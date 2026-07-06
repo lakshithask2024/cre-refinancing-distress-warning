@@ -266,18 +266,30 @@ class DeltaReader:
     def read(self) -> list[dict[str, Any]]:
         """Read all records from the Delta table.
 
-        Falls back to reading Parquet files (via pyarrow) or JSON-lines files
-        if _delta_log/ is not present (e.g., Bronze landed as Parquet not Delta).
+        Strategy (mirrors the writer's priority):
+          a. _delta_log/ exists AND PySpark available → Spark Delta reader
+          b. _delta_log/ exists AND PySpark NOT available → pure-Python JSON parser (sandbox)
+          c. No _delta_log/ BUT .parquet files exist → read Parquet (pyarrow or Spark)
+          d. No _delta_log/ AND no .parquet → try JSON-lines → else FileNotFoundError
+
+        Always returns list[dict[str, Any]] for downstream compatibility.
         """
-        if self.delta_log_path.exists():
+        has_delta_log = self.delta_log_path.exists() and any(self.delta_log_path.glob("*.json"))
+
+        if has_delta_log:
+            # Try Spark Delta reader first (handles real Parquet-backed Delta)
+            spark_records = self._try_spark_delta_read()
+            if spark_records is not None:
+                return spark_records
+            # Fall back to pure-Python parser (sandbox JSON-lines Delta)
             return self._read_from_delta_log()
 
-        # Fallback: try Parquet files
+        # No _delta_log — try Parquet files directly
         parquet_files = list(self.table_path.rglob("*.parquet"))
         if parquet_files:
             return self._read_parquet_fallback(parquet_files)
 
-        # Fallback: try JSON-lines files
+        # Try JSON-lines files
         json_files = list(self.table_path.rglob("*.json"))
         jsonl_files = list(self.table_path.rglob("*.jsonl"))
         data_files = [f for f in json_files + jsonl_files if "_delta_log" not in str(f)]
@@ -288,6 +300,36 @@ class DeltaReader:
             f"Cannot read table at {self.table_path}: no _delta_log/, "
             f"no .parquet files, and no .json/.jsonl data files found."
         )
+
+    def _try_spark_delta_read(self) -> list[dict[str, Any]] | None:
+        """Attempt to read Delta table via PySpark + delta-spark.
+
+        Returns list of dicts on success, None if PySpark/delta not available.
+        """
+        try:
+            from pyspark.sql import SparkSession
+            from delta import configure_spark_with_delta_pip
+
+            builder = (
+                SparkSession.builder.master("local[*]")
+                .appName("cre-distress-delta-reader")
+                .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+                .config(
+                    "spark.sql.catalog.spark_catalog",
+                    "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+                )
+            )
+            spark = configure_spark_with_delta_pip(builder).getOrCreate()
+            df = spark.read.format("delta").load(str(self.table_path))
+            # Convert to list of dicts (compatible with downstream pure-Python pipeline)
+            records = [row.asDict() for row in df.collect()]
+            return records
+        except ImportError:
+            # PySpark or delta not installed — fall through to pure-Python
+            return None
+        except Exception:
+            # Spark available but read failed (e.g., corrupted table) — fall through
+            return None
 
     def _read_from_delta_log(self) -> list[dict[str, Any]]:
         """Read using Delta transaction log."""
