@@ -434,8 +434,9 @@ def write_delta(loans: list[LoanRecord], output_path: Path) -> None:
     # Attempt 1: Delta Lake via pyspark
     try:
         from pyspark.sql import SparkSession
+        from delta import configure_spark_with_delta_pip
 
-        spark = (
+        builder = (
             SparkSession.builder.master("local[*]")
             .appName("cre-loan-generator")
             .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
@@ -443,8 +444,8 @@ def write_delta(loans: list[LoanRecord], output_path: Path) -> None:
                 "spark.sql.catalog.spark_catalog",
                 "org.apache.spark.sql.delta.catalog.DeltaCatalog",
             )
-            .getOrCreate()
         )
+        spark = configure_spark_with_delta_pip(builder).getOrCreate()
         df = spark.createDataFrame(records)
         (
             df.write.format("delta")

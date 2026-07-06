@@ -20,8 +20,9 @@ def spark():
     """Create a shared SparkSession for integration tests."""
     # Lazy import — only needed for integration tests
     from pyspark.sql import SparkSession
+    from delta import configure_spark_with_delta_pip
 
-    session = (
+    builder = (
         SparkSession.builder.master("local[2]")
         .appName("cre-distress-warning-tests")
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
@@ -31,8 +32,8 @@ def spark():
         )
         .config("spark.driver.memory", "2g")
         .config("spark.sql.shuffle.partitions", "2")
-        .getOrCreate()
     )
+    session = configure_spark_with_delta_pip(builder).getOrCreate()
 
     yield session
     session.stop()

@@ -492,8 +492,9 @@ def write_market_data(records: list[MarketDataRecord], output_path: Path) -> Non
     # Attempt 1: Delta Lake via pyspark
     try:
         from pyspark.sql import SparkSession
+        from delta import configure_spark_with_delta_pip
 
-        spark = (
+        builder = (
             SparkSession.builder.master("local[*]")
             .appName("cre-market-fetcher")
             .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
@@ -501,8 +502,8 @@ def write_market_data(records: list[MarketDataRecord], output_path: Path) -> Non
                 "spark.sql.catalog.spark_catalog",
                 "org.apache.spark.sql.delta.catalog.DeltaCatalog",
             )
-            .getOrCreate()
         )
+        spark = configure_spark_with_delta_pip(builder).getOrCreate()
         df = spark.createDataFrame(dicts)
         (
             df.write.format("delta")
