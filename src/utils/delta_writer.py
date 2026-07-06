@@ -264,12 +264,33 @@ class DeltaReader:
         self.delta_log_path = self.table_path / "_delta_log"
 
     def read(self) -> list[dict[str, Any]]:
-        """Read all records from the Delta table."""
-        if not self.delta_log_path.exists():
-            raise FileNotFoundError(
-                f"Not a Delta table: {self.table_path} (no _delta_log/ found)"
-            )
+        """Read all records from the Delta table.
 
+        Falls back to reading Parquet files (via pyarrow) or JSON-lines files
+        if _delta_log/ is not present (e.g., Bronze landed as Parquet not Delta).
+        """
+        if self.delta_log_path.exists():
+            return self._read_from_delta_log()
+
+        # Fallback: try Parquet files
+        parquet_files = list(self.table_path.rglob("*.parquet"))
+        if parquet_files:
+            return self._read_parquet_fallback(parquet_files)
+
+        # Fallback: try JSON-lines files
+        json_files = list(self.table_path.rglob("*.json"))
+        jsonl_files = list(self.table_path.rglob("*.jsonl"))
+        data_files = [f for f in json_files + jsonl_files if "_delta_log" not in str(f)]
+        if data_files:
+            return self._read_jsonl_fallback(data_files)
+
+        raise FileNotFoundError(
+            f"Cannot read table at {self.table_path}: no _delta_log/, "
+            f"no .parquet files, and no .json/.jsonl data files found."
+        )
+
+    def _read_from_delta_log(self) -> list[dict[str, Any]]:
+        """Read using Delta transaction log."""
         active_files = self._get_active_files()
         records = []
 
@@ -288,6 +309,56 @@ class DeltaReader:
                             records.append(record)
 
         return records
+
+    def _read_parquet_fallback(self, parquet_files: list[Path]) -> list[dict[str, Any]]:
+        """Read Parquet files using pyarrow."""
+        try:
+            import pyarrow.parquet as pq
+
+            records = []
+            for pf in parquet_files:
+                table = pq.read_table(pf)
+                batch_records = table.to_pylist()
+                # Extract partition values from directory path
+                partition_values = self._extract_partition_values(pf)
+                for rec in batch_records:
+                    rec.update(partition_values)
+                records.extend(batch_records)
+            return records
+        except ImportError:
+            # pyarrow not available, try JSON fallback
+            json_files = list(self.table_path.rglob("*.json"))
+            jsonl_files = list(self.table_path.rglob("*.jsonl"))
+            data_files = [f for f in json_files + jsonl_files if "_delta_log" not in str(f)]
+            if data_files:
+                return self._read_jsonl_fallback(data_files)
+            raise FileNotFoundError(
+                f"Cannot read Parquet (pyarrow not available) and no JSON fallback "
+                f"at {self.table_path}"
+            )
+
+    def _read_jsonl_fallback(self, data_files: list[Path]) -> list[dict[str, Any]]:
+        """Read JSON-lines files with partition value extraction."""
+        records = []
+        for f in data_files:
+            partition_values = self._extract_partition_values(f)
+            with open(f) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        record = json.loads(line)
+                        record.update(partition_values)
+                        records.append(record)
+        return records
+
+    def _extract_partition_values(self, file_path: Path) -> dict[str, str]:
+        """Extract partition key=value pairs from directory path components."""
+        partition_values = {}
+        for part in file_path.relative_to(self.table_path).parts[:-1]:
+            if "=" in part:
+                key, value = part.split("=", 1)
+                partition_values[key] = value
+        return partition_values
 
     def read_partition(self, partition_col: str, partition_value: Any) -> list[dict[str, Any]]:
         """Read records from a specific partition."""

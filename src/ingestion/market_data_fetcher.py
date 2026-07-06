@@ -332,8 +332,17 @@ class MarketDataFetcher:
     """
 
     def __init__(self, offline: bool = False, api_key: str | None = None):
+        # Auto-enable offline mode if no FRED API key is available
+        resolved_key = api_key or os.environ.get("FRED_API_KEY", "")
+        if not offline and not resolved_key:
+            logger.info(
+                "FRED_API_KEY not set — automatically enabling offline mode. "
+                "Set FRED_API_KEY in .env or pass --api-key to use live FRED data."
+            )
+            offline = True
+
         self.offline = offline
-        self.fred = FREDClient(api_key=api_key) if not offline else None
+        self.fred = FREDClient(api_key=resolved_key) if not offline else None
         self.cap_rate_loader = CapRateLoader()
 
     def fetch_all(self) -> list[MarketDataRecord]:
@@ -492,7 +501,32 @@ def write_market_data(records: list[MarketDataRecord], output_path: Path) -> Non
     # Attempt 1: Delta Lake via pyspark
     try:
         from pyspark.sql import SparkSession
+        from pyspark.sql.types import (
+            StructType, StructField, StringType, DoubleType,
+        )
         from delta import configure_spark_with_delta_pip
+
+        # Explicit schema — avoids CANNOT_DETERMINE_TYPE on nullable/mixed-type fields
+        market_schema = StructType([
+            StructField("data_type", StringType(), False),
+            StructField("observation_date", StringType(), True),
+            StructField("value", DoubleType(), True),
+            StructField("frequency", StringType(), True),
+            StructField("property_type", StringType(), True),
+            StructField("metro", StringType(), True),
+            StructField("series_id", StringType(), True),
+            StructField("ingested_at", StringType(), True),
+            StructField("source", StringType(), True),
+            StructField("source_version", StringType(), True),
+        ])
+
+        # Ensure value is always float (not int/None mismatch)
+        for rec in dicts:
+            rec["value"] = float(rec["value"]) if rec["value"] is not None else None
+            # Convert None to empty string for string fields (Spark handles nullable)
+            rec["property_type"] = rec["property_type"] or None
+            rec["metro"] = rec["metro"] or None
+            rec["series_id"] = rec["series_id"] or None
 
         builder = (
             SparkSession.builder.master("local[*]")
@@ -504,7 +538,7 @@ def write_market_data(records: list[MarketDataRecord], output_path: Path) -> Non
             )
         )
         spark = configure_spark_with_delta_pip(builder).getOrCreate()
-        df = spark.createDataFrame(dicts)
+        df = spark.createDataFrame(dicts, schema=market_schema)
         (
             df.write.format("delta")
             .mode("overwrite")

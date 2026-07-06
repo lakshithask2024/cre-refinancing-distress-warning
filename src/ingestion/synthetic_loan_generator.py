@@ -434,7 +434,48 @@ def write_delta(loans: list[LoanRecord], output_path: Path) -> None:
     # Attempt 1: Delta Lake via pyspark
     try:
         from pyspark.sql import SparkSession
+        from pyspark.sql.types import (
+            StructType, StructField, StringType, DoubleType, IntegerType, BooleanType,
+        )
         from delta import configure_spark_with_delta_pip
+
+        # Explicit schema to avoid type inference issues with Delta
+        loan_schema = StructType([
+            StructField("loan_id", StringType(), False),
+            StructField("deal_name", StringType(), True),
+            StructField("origination_date", StringType(), True),
+            StructField("maturity_date", StringType(), True),
+            StructField("origination_year", IntegerType(), True),
+            StructField("original_balance", DoubleType(), True),
+            StructField("current_balance", DoubleType(), True),
+            StructField("note_rate", DoubleType(), True),
+            StructField("amortization_type", StringType(), True),
+            StructField("balloon_flag", BooleanType(), True),
+            StructField("loan_term_years", IntegerType(), True),
+            StructField("loan_purpose", StringType(), True),
+            StructField("property_id", StringType(), True),
+            StructField("property_type", StringType(), True),
+            StructField("metro_area", StringType(), True),
+            StructField("submarket", StringType(), True),
+            StructField("occupancy_pct", DoubleType(), True),
+            StructField("noi_annual", DoubleType(), True),
+            StructField("property_value_at_origination", DoubleType(), True),
+            StructField("ltv_at_origination", DoubleType(), True),
+            StructField("dscr_at_origination", DoubleType(), True),
+            StructField("sponsor_credit_tier", StringType(), True),
+            StructField("ingested_at", StringType(), True),
+            StructField("source", StringType(), True),
+            StructField("source_version", StringType(), True),
+        ])
+
+        # Ensure numeric types are consistent (cast ints to float where schema expects Double)
+        for rec in records:
+            rec["original_balance"] = float(rec["original_balance"])
+            rec["current_balance"] = float(rec["current_balance"])
+            rec["noi_annual"] = float(rec["noi_annual"])
+            rec["property_value_at_origination"] = float(rec["property_value_at_origination"])
+            rec["origination_year"] = int(rec["origination_year"])
+            rec["loan_term_years"] = int(rec["loan_term_years"])
 
         builder = (
             SparkSession.builder.master("local[*]")
@@ -446,7 +487,7 @@ def write_delta(loans: list[LoanRecord], output_path: Path) -> None:
             )
         )
         spark = configure_spark_with_delta_pip(builder).getOrCreate()
-        df = spark.createDataFrame(records)
+        df = spark.createDataFrame(records, schema=loan_schema)
         (
             df.write.format("delta")
             .mode("overwrite")
