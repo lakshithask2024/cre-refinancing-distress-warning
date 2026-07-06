@@ -1,0 +1,51 @@
+version: 2
+
+sources:
+  - name: silver
+    description: "Silver layer — cleaned, enriched loan and market data"
+    schema: silver
+    tables:
+      - name: loan_features
+        description: >
+          Enriched loan records with market-derived features.
+          Each row is one loan with its current distress metrics computed
+          from the latest available market rates.
+        columns:
+          - name: loan_id
+            description: "Unique loan identifier"
+          - name: origination_date
+            description: "Loan origination date (ISO format)"
+          - name: maturity_date
+            description: "Loan maturity date (ISO format)"
+          - name: origination_year
+            description: "Year of loan origination"
+          - name: original_balance
+            description: "Original loan balance at origination ($)"
+          - name: current_balance
+            description: "Current outstanding balance ($)"
+          - name: note_rate
+            description: "Coupon rate as decimal (e.g., 0.045 = 4.5%)"
+          - name: property_type
+            description: "Property type: office, retail, industrial, multifamily, hotel"
+          - name: metro_area
+            description: "Metropolitan area where property is located"
+          - name: noi_annual
+            description: "Net operating income, annual ($)"
+          - name: current_ltv
+            description: "Current loan-to-value ratio based on market cap rate valuation"
+          - name: new_dscr
+            description: "Debt service coverage ratio at current refinance rate"
+          - name: rate_gap
+            description: "Refinance rate minus origination note rate (decimal)"
+          - name: rate_gap_bps
+            description: "Rate gap in basis points"
+          - name: refinance_rate
+            description: "Projected refinance rate (Treasury 10Y + type spread, decimal)"
+          - name: debt_yield
+            description: "NOI / current balance (decimal)"
+          - name: months_to_maturity
+            description: "Months until loan maturity (negative if already matured)"
+          - name: _refi_stressed
+            description: "Boolean flag: True if new_dscr < 1.0 OR current_ltv > 0.80"
+          - name: _feature_computed_at
+            description: "Timestamp when features were computed"

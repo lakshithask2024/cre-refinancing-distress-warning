@@ -1,0 +1,76 @@
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+.venv/
+venv/
+env/
+.python-version
+
+# ─── Environment & Secrets ────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ─── Data & Delta Lake ────────────────────────────────────────────────────────
+data/bronze/
+data/silver/
+data/gold/
+data/exports/
+*.parquet
+*.delta/
+_delta_log/
+
+# ─── MLflow ───────────────────────────────────────────────────────────────────
+mlruns/
+mlartifacts/
+mlflow.db
+
+# ─── dbt ──────────────────────────────────────────────────────────────────────
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+dbt/profiles.yml
+
+# ─── Spark ────────────────────────────────────────────────────────────────────
+spark-warehouse/
+metastore_db/
+derby.log
+
+# ─── Jupyter / Notebooks ──────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ─── IDE ──────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ─── Testing & Coverage ──────────────────────────────────────────────────────
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ─── Power BI ─────────────────────────────────────────────────────────────────
+# Keep .pbix templates but ignore temp files
+*.pbix.tmp
+*.pbit.tmp
+
+# ─── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini

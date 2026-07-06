@@ -1,0 +1,163 @@
+version: 2
+
+models:
+  - name: loan_current_state
+    description: >
+      One row per loan representing the most recent distress assessment.
+      Primary consumption table for the portfolio dashboard and XGBoost model input.
+      Contains all loan terms, property attributes, current market-derived metrics,
+      and distress tier classification.
+    columns:
+      - name: loan_id
+        description: "Unique loan identifier (primary key)"
+        tests:
+          - not_null
+          - unique
+      - name: property_type
+        description: "Property type (lowercase): office, retail, industrial, multifamily, hotel"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["office", "retail", "industrial", "multifamily", "hotel"]
+      - name: metro_area
+        description: "Metropolitan area where the property is located"
+        tests:
+          - not_null
+      - name: origination_date
+        description: "Loan origination date (ISO format YYYY-MM-DD)"
+      - name: maturity_date
+        description: "Loan maturity date (ISO format YYYY-MM-DD)"
+      - name: origination_year
+        description: "Year of loan origination (integer)"
+      - name: original_balance
+        description: "Original loan balance at origination ($)"
+        tests:
+          - not_null
+      - name: current_balance
+        description: "Current outstanding principal balance ($)"
+      - name: note_rate
+        description: "Origination coupon rate as decimal (e.g., 0.045 = 4.5%)"
+      - name: amortization_type
+        description: "Loan amortization: 'interest_only' or 'amortizing'"
+        tests:
+          - accepted_values:
+              values: ["interest_only", "amortizing"]
+      - name: current_cap_rate
+        description: "Current market cap rate for this property type (%)"
+      - name: current_value
+        description: "Implied current property value: NOI / cap_rate ($)"
+      - name: current_ltv
+        description: "Current loan-to-value ratio based on market valuation"
+      - name: refinance_rate
+        description: "Projected refinance rate (Treasury + spread, decimal)"
+      - name: rate_gap
+        description: "Refinance rate minus origination rate (decimal)"
+      - name: rate_gap_bps
+        description: "Rate gap expressed in basis points"
+      - name: new_dscr
+        description: "DSCR at projected refinance rate"
+      - name: debt_yield
+        description: "Debt yield: NOI / current_balance (decimal)"
+      - name: months_to_maturity
+        description: "Months until loan maturity (negative = already matured)"
+      - name: distress_tier
+        description: >
+          Risk classification based on refinance viability:
+          'critical' (DSCR<1 AND LTV>80%), 'high' (DSCR<1 OR LTV>80%),
+          'medium' (DSCR<1.25 OR LTV>70%), 'low' (all others)
+        tests:
+          - accepted_values:
+              values: ["critical", "high", "medium", "low"]
+      - name: dscr_change
+        description: "Change in DSCR from origination to current (new_dscr - orig_dscr)"
+      - name: ltv_change
+        description: "Change in LTV from origination to current (current_ltv - orig_ltv)"
+
+  - name: loan_distress_history
+    description: >
+      Full time series of distress metrics per loan snapshot. Each row represents
+      one assessment point. Feeds the survival analysis model and temporal dashboards.
+    columns:
+      - name: loan_id
+        description: "Loan identifier"
+        tests:
+          - not_null
+      - name: snapshot_at
+        description: "Timestamp of this distress assessment"
+        tests:
+          - not_null
+      - name: is_distressed
+        description: "Boolean: loan is in refinancing distress"
+      - name: distress_tier
+        description: "Risk tier: critical, high, medium, low"
+        tests:
+          - accepted_values:
+              values: ["critical", "high", "medium", "low"]
+      - name: dscr_severity_score
+        description: "Continuous severity score based on DSCR (0=healthy, >1=severe)"
+      - name: ltv_severity_score
+        description: "Continuous severity score based on LTV (0=healthy, >1=severe)"
+
+  - name: market_distress_index
+    description: >
+      Market-level distress aggregation by metro × property_type × vintage.
+      Enables geographic and sector concentration analysis.
+    columns:
+      - name: metro_area
+        description: "Metropolitan area"
+        tests:
+          - not_null
+      - name: property_type
+        description: "Property type (lowercase)"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["office", "retail", "industrial", "multifamily", "hotel"]
+      - name: origination_year
+        description: "Loan vintage year"
+        tests:
+          - not_null
+      - name: loan_count
+        description: "Number of loans in this cohort"
+      - name: total_upb
+        description: "Total unpaid principal balance ($)"
+      - name: pct_distressed_loans
+        description: "Percentage of loans flagged as distressed (0-1)"
+      - name: total_upb_at_risk
+        description: "Sum of balances for distressed loans ($)"
+      - name: weighted_avg_dscr
+        description: "Balance-weighted average DSCR for cohort"
+      - name: weighted_avg_ltv
+        description: "Balance-weighted average LTV for cohort"
+
+  - name: maturity_wall
+    description: >
+      Maturity wall analysis: loans grouped by maturity period (year/quarter)
+      showing upcoming refinancing volume and risk profile.
+      Filtered to 2024-2028 maturity window.
+    columns:
+      - name: maturity_year
+        description: "Year of loan maturity"
+        tests:
+          - not_null
+      - name: maturity_quarter
+        description: "Quarter of maturity (1-4)"
+        tests:
+          - not_null
+      - name: maturity_period
+        description: "Human-readable period label (e.g., '2025-Q2')"
+      - name: property_type
+        description: "Property type (lowercase)"
+        tests:
+          - accepted_values:
+              values: ["office", "retail", "industrial", "multifamily", "hotel"]
+      - name: count_loans_maturing
+        description: "Number of loans maturing in this period"
+      - name: total_upb_maturing
+        description: "Total balance of loans maturing ($)"
+      - name: pct_distressed
+        description: "Percentage of maturing loans that are distressed (0-1)"
+      - name: avg_dscr
+        description: "Average DSCR for loans maturing in this period"
+      - name: avg_ltv
+        description: "Average LTV for loans maturing in this period"

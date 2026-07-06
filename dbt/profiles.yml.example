@@ -1,0 +1,37 @@
+# ─── dbt Profile Configuration ────────────────────────────────────────────────
+# Two targets: sandbox (dbt-duckdb, local dev) and production (dbt-spark, Databricks)
+#
+# Copy this to ~/.dbt/profiles.yml or set DBT_PROFILES_DIR to this directory.
+
+cre_distress:
+  target: sandbox
+
+  outputs:
+    # ─── Sandbox: DuckDB (local development) ────────────────────────────
+    # Reads Silver tables from data/silver/ (JSON-lines format from Delta writer)
+    # Writes Gold tables to data/gold/ as Parquet
+    sandbox:
+      type: duckdb
+      path: "data/cre_distress.duckdb"
+      schema: gold
+      threads: 4
+
+    # ─── Production: Spark on Databricks ────────────────────────────────
+    # Reads from Unity Catalog silver schema, writes to gold schema as Delta
+    production:
+      type: spark
+      method: odbc
+      host: "{{ env_var('DATABRICKS_HOST') }}"
+      token: "{{ env_var('DATABRICKS_TOKEN') }}"
+      endpoint: "{{ env_var('DATABRICKS_SQL_WAREHOUSE_ID') }}"
+      schema: gold
+      catalog: cre_distress
+      threads: 4
+
+# ─── Dialect Notes ────────────────────────────────────────────────────────────
+# The SQL models use ANSI SQL that works on both DuckDB and Spark SQL.
+# Key dialect adjustments for production (Spark):
+#   - DuckDB: strftime('%Y', date_col) → Spark: year(date_col)
+#   - DuckDB: EXTRACT(YEAR FROM ...) → Spark: year(...)
+#   - Both support: CASE, COALESCE, window functions, CTEs
+#   - Materialization: DuckDB writes Parquet; Spark writes Delta

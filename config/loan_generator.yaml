@@ -1,0 +1,158 @@
+# ─── Synthetic Loan Generator Configuration ──────────────────────────────────
+# Controls the statistical properties of generated CMBS-style loan data.
+# All distributions are parameterized per property type for realism.
+
+defaults:
+  portfolio_size: 10000
+  vintage_range:
+    start_year: 2015
+    end_year: 2025
+  term_years: [5, 7, 10]
+  random_seed: 42
+
+# Metro areas included in generation (CBSA-style)
+metros:
+  - New York
+  - Los Angeles
+  - Chicago
+  - Dallas
+  - San Francisco
+  - Miami
+  - Washington DC
+  - Boston
+  - Atlanta
+  - Seattle
+  - Denver
+  - Houston
+  - Phoenix
+  - Philadelphia
+  - Minneapolis
+
+# Property-type-specific distribution parameters
+property_types:
+  Office:
+    weight: 0.30  # portfolio allocation
+    ltv:
+      mean: 0.68
+      std: 0.08
+      min: 0.40
+      max: 0.85
+    dscr:
+      mean: 1.35
+      std: 0.20
+      min: 0.80
+      max: 2.50
+    coupon_spread_bps:
+      mean: 200
+      std: 40
+    occupancy:
+      mean: 0.82
+      std: 0.12
+      min: 0.30
+      max: 1.00
+    noi_per_sqft:
+      mean: 28.0
+      std: 8.0
+
+  Retail:
+    weight: 0.15
+    ltv:
+      mean: 0.63
+      std: 0.07
+      min: 0.35
+      max: 0.80
+    dscr:
+      mean: 1.50
+      std: 0.25
+      min: 0.90
+      max: 3.00
+    coupon_spread_bps:
+      mean: 220
+      std: 45
+    occupancy:
+      mean: 0.88
+      std: 0.10
+      min: 0.40
+      max: 1.00
+    noi_per_sqft:
+      mean: 22.0
+      std: 6.0
+
+  Industrial:
+    weight: 0.20
+    ltv:
+      mean: 0.58
+      std: 0.06
+      min: 0.30
+      max: 0.75
+    dscr:
+      mean: 1.65
+      std: 0.22
+      min: 1.00
+      max: 3.50
+    coupon_spread_bps:
+      mean: 170
+      std: 35
+    occupancy:
+      mean: 0.94
+      std: 0.05
+      min: 0.60
+      max: 1.00
+    noi_per_sqft:
+      mean: 10.0
+      std: 3.0
+
+  Multifamily:
+    weight: 0.25
+    ltv:
+      mean: 0.65
+      std: 0.07
+      min: 0.35
+      max: 0.80
+    dscr:
+      mean: 1.45
+      std: 0.18
+      min: 0.90
+      max: 2.80
+    coupon_spread_bps:
+      mean: 160
+      std: 30
+    occupancy:
+      mean: 0.93
+      std: 0.05
+      min: 0.65
+      max: 1.00
+    noi_per_sqft:
+      mean: 16.0
+      std: 4.0
+
+  Hotel:
+    weight: 0.10
+    ltv:
+      mean: 0.60
+      std: 0.09
+      min: 0.35
+      max: 0.80
+    dscr:
+      mean: 1.55
+      std: 0.30
+      min: 0.70
+      max: 3.00
+    coupon_spread_bps:
+      mean: 280
+      std: 60
+    occupancy:
+      mean: 0.68
+      std: 0.15
+      min: 0.25
+      max: 0.95
+    noi_per_sqft:
+      mean: 35.0
+      std: 12.0
+
+# Loan amount distribution (applies across all types)
+loan_amount:
+  log_mean: 16.5    # ln($) — approx $15M median
+  log_std: 1.2
+  min: 1_000_000    # $1M floor
+  max: 500_000_000  # $500M cap

@@ -1,0 +1,57 @@
+# ─── Stress Testing Scenario Definitions ──────────────────────────────────────
+# Each scenario defines basis-point shocks to interest rates and/or cap rates.
+# The stress engine applies these shocks, recomputes derived features, and
+# re-scores distress probability using the production model.
+
+# Rate shock: added to the projected refinance rate
+# Cap rate shock: added to the current market cap rate (reduces property value)
+
+scenarios:
+  - name: base_case
+    description: "Current market conditions — no shock applied"
+    rate_shock_bps: 0
+    cap_rate_shock_bps: 0
+
+  - name: rate_plus_100
+    description: "Moderate rate stress: +100 bps to refinance rate"
+    rate_shock_bps: 100
+    cap_rate_shock_bps: 0
+
+  - name: rate_plus_200
+    description: "Elevated rate stress: +200 bps to refinance rate"
+    rate_shock_bps: 200
+    cap_rate_shock_bps: 0
+
+  - name: rate_plus_300
+    description: "Severe rate stress: +300 bps to refinance rate"
+    rate_shock_bps: 300
+    cap_rate_shock_bps: 0
+
+  - name: cap_plus_100
+    description: "Cap rate expansion: +100 bps (property value decline)"
+    rate_shock_bps: 0
+    cap_rate_shock_bps: 100
+
+  - name: cap_plus_200
+    description: "Severe cap rate expansion: +200 bps (significant value decline)"
+    rate_shock_bps: 0
+    cap_rate_shock_bps: 200
+
+  - name: combined_200_100
+    description: "Combined stress: +200 bps rate AND +100 bps cap rate"
+    rate_shock_bps: 200
+    cap_rate_shock_bps: 100
+
+# ─── Distress Tier Thresholds ─────────────────────────────────────────────────
+# Used to classify loans into risk categories based on distress probability.
+tier_thresholds:
+  high: 0.70      # distress_prob >= 0.70 → High Risk
+  medium: 0.40    # distress_prob >= 0.40 → Medium Risk
+  # Below 0.40 → Low Risk
+
+# ─── Monotonicity Validation ──────────────────────────────────────────────────
+# The stress engine validates that portfolio-level distress rate is
+# non-decreasing as shock severity increases within each shock type.
+validation:
+  enforce_monotonicity: true
+  tolerance: 0.001  # allow tiny floating-point non-monotonicity

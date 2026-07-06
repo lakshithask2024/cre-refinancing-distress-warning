@@ -1,0 +1,38 @@
+# ─── dbt Project: CRE Distress Warning System ────────────────────────────────
+# Silver → Gold transformations for loan distress analytics
+
+name: "cre_distress"
+version: "0.1.0"
+config-version: 2
+
+profile: "cre_distress"
+
+# Directories
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# Model-level configurations
+models:
+  cre_distress:
+    # Gold models: materialized as tables
+    gold:
+      +materialized: table
+      +schema: gold
+      +tags: ["gold", "consumption"]
+
+# Variables
+vars:
+  # Distress tier thresholds
+  distress_tier_high: 0.70
+  distress_tier_medium: 0.40
+  # Maturity wall analysis window
+  maturity_start_year: 2024
+  maturity_end_year: 2028
