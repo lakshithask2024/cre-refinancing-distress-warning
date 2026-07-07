@@ -154,3 +154,56 @@ Choosing LTV > 0.70 vs 0.80 vs 0.90 is a business decision about what "distress"
 ---
 
 *This document feeds into the SR 11-7 Model Risk Management documentation under "Model Development and Validation History."*
+
+
+
+---
+
+## Post-v4: MLflow Artifact Hygiene
+
+### Bug Discovered
+
+After v4 training completed successfully (AUC 0.92, all metrics logged), downstream consumers (SHAP CLI, stress testing engine) failed with:
+
+> "Failed to download artifacts from path 'model'"
+
+The XGBoost model was registered in the MLflow Model Registry (version 4, status "Staging"), but the actual model artifact — the serialized `.xgb` file and `MLmodel` metadata — was never written to disk. The registry entry pointed to a non-existent artifact path.
+
+### Root Cause
+
+MLflow 3.x introduced two breaking changes that combined to create a silent failure:
+
+1. **`artifact_path` parameter deprecated**: The old `mlflow.xgboost.log_model(model, artifact_path="model")` call silently registered metadata without persisting the binary artifact. The new API requires `name="model"` (or explicit `xgb_model=` kwarg).
+
+2. **Stages deprecated in favor of aliases**: `registered_model_name` with stage transitions no longer works for loading. The registry accepted the registration but `models:/cre_distress_classifier/Staging` (stage syntax) returned "not found" — only `models:/cre_distress_classifier@Staging` (alias syntax) resolves correctly.
+
+### Fix
+
+1. **Refactored `log_model` call** in `distress_classifier.py`:
+   ```python
+   model_info = mlflow.xgboost.log_model(
+       xgb_model=best_model,
+       artifact_path="model",
+       input_example=X_train[:5],
+       registered_model_name="cre_distress_classifier",
+   )
+   ```
+   Added post-registration verification:
+   ```python
+   _ = mlflow.xgboost.load_model(model_info.model_uri)
+   logger.info(f"✓ Model artifact verified loadable at {model_info.model_uri}")
+   ```
+   If verification fails, training raises `RuntimeError` rather than silently producing a broken registry entry.
+
+2. **Set alias instead of stage**:
+   ```python
+   client.set_registered_model_alias("cre_distress_classifier", "Staging", version=model_info.registered_model_version)
+   ```
+
+3. **Updated all downstream loaders** (SHAP CLI, stress engine, survival CLI) to use alias syntax: `models:/cre_distress_classifier@Staging` with fallback to version-based loading (`models:/cre_distress_classifier/{max_version}`).
+
+### Lesson
+
+**Model registration and model logging are separate operations in MLflow.** It is possible to successfully register a model version that points to a non-existent artifact. This creates a silent failure that only surfaces when a consumer tries to load the model — potentially days later in a production pipeline.
+
+Post-registration load verification is essential. The pattern `load_model(model_info.model_uri)` immediately after `log_model()` catches this class of bug at training time, not deployment time.
