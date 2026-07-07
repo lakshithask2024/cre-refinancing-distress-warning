@@ -362,13 +362,17 @@ Dashboard documentation lives in `powerbi/` including star schema spec, DAX meas
 
 ## Model Risk Management
 
-This system includes SR 11-7 compliant model documentation in `docs/model_risk_management/`, covering:
+SR 11-7 compliant model risk management documentation in [`docs/model_risk_management/`](docs/model_risk_management/):
 
-- Model purpose and methodology
-- Assumptions and limitations
-- Validation results and back-testing
-- Ongoing monitoring plan
-- Model inventory card
+| Section | Document | Content |
+|---------|----------|---------|
+| 1 | `01_model_overview.md` | Purpose, intended users, in/out-of-scope decisions, governance |
+| 2 | `02_data_and_assumptions.md` | Data lineage, key assumptions (7), known limitations (6) |
+| 3 | `03_methodology.md` | Architecture, 24-feature set, hyperparameters, rationale |
+| 4 | `04_performance_and_validation.md` | Test metrics (AUC 0.92), SHAP plots, backtesting, calibration |
+| 5 | `05_limitations_and_conservative_use.md` | 8 explicit limitations, PD thresholds, prohibited uses |
+| 6 | `06_monitoring_plan.md` | PSI/KS thresholds, retraining triggers, governance roles |
+| 7 | `07_stress_testing_appendix.md` | 8 scenarios, results table, cap rate dominance finding |
 
 ---
 
