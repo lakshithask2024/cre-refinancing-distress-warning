@@ -1,378 +1,200 @@
 # CRE Refinancing Distress Early-Warning System
 
-A medallion-architecture data platform that ingests commercial real estate loan data, models refinancing distress probability, runs interest-rate and cap-rate stress scenarios, and outputs a portfolio-level risk dashboard for CRE lenders and CMBS investors.
+**A medallion-architecture data platform for predicting commercial real estate refinance defaults 24 months before maturity.**
+
+![Python 3.11](https://img.shields.io/badge/Python-3.11-blue) ![License MIT](https://img.shields.io/badge/License-MIT-green) ![Tests 120 passing](https://img.shields.io/badge/Tests-120%20passing-brightgreen)
 
 ---
 
-## Business Problem
+## The Business Problem
 
-Roughly **$1.5 trillion** of commercial real estate debt matures in the United States through 2027. Much of it consists of office loans originated during a period of historically low interest rates and elevated property valuations.
+Consider a $50M office loan originated in San Francisco in 2019:
 
-Banks, CMBS bondholders, and special servicers need to identify which loans are unlikely to refinance successfully — **before maturity** — so they can act early: pursue loan modifications, build reserves, or position assets for disposition.
+| At Origination (2019) | At Maturity (2026) |
+|----------------------|-------------------|
+| Cap rate: 5.5% | Cap rate: 8.0% |
+| Property value: $70M | Property value: $38M |
+| LTV: 71% | LTV: 132% (underwater) |
+| Note rate: 3.5% | Refi rate: 6.5% |
+| DSCR: 1.45x | DSCR: 0.79x |
 
-Manual loan-by-loan analysis does not scale to portfolios containing thousands of loans. This system automates the identification and prioritization of refinancing distress risk across large commercial real estate portfolios.
+This loan cannot refinance. The borrower cannot cover debt service at current rates, and the property is worth less than the debt. The lender faces a maturity default.
 
-### Model Purpose and Positioning
+**Now multiply this by thousands of loans.** Roughly $1.5 trillion of US commercial real estate debt matures through 2027 — much of it office and retail originated at low rates and tight cap rates. Banks, CMBS bondholders, and special servicers need to identify which loans will fail refinancing **before** maturity, at scale.
 
-The XGBoost distress classifier is a **risk stratification tool** — it rank-orders loans by refinancing distress probability 24 months before maturity, enabling credit risk teams to:
+This system automates that identification 24 months in advance.
 
-- Prioritize workout efforts (focus attention on the top quintile first)
-- Stage reserve allocations under CECL (assign higher loss provisions to high-probability loans)
-- Route loans to special servicing before maturity triggers a hard default
+---
 
-**This is NOT a standalone default-decision engine.** The model output feeds into human-led credit review, analogous to how banks use PD models for allowance staging — not for automatic loan foreclosure. All disposition decisions remain with the credit committee.
+## What This System Does
 
-Model governance follows the **SR 11-7 / OCC 2011-12** framework for model risk management. See [`docs/model_risk_management/`](docs/model_risk_management/) for the full MRM documentation package.
+- **Ingests** real market data (FRED Treasury/SOFR) + synthetic CMBS loan portfolio into a Delta Lake medallion architecture
+- **Engineers features** snapshotted at T_obs = maturity - 24 months (no leakage from future data)
+- **Trains an XGBoost classifier** (AUC 0.92) with Optuna HPO to predict refinancing distress probability
+- **Fits a Cox PH survival model** (concordance 0.94) for time-to-distress estimation
+- **Runs 8 stress test scenarios** — rate shocks, cap rate expansion, combined severe, office-specific
+- **Computes SHAP explanations** per loan — top-5 risk drivers for credit officer drill-through
+- **Exports a Power BI star schema** with DAX measures library and 5-page report specifications
+- **Ships with SR 11-7 compliant** model risk management documentation (7 sections)
+- **Registers models in MLflow** with alias-based versioning (`@Staging`)
 
-### Model Performance (v4)
+---
 
-| Metric | Value | Interpretation |
-|--------|-------|----------------|
-| **AUC-ROC** | 0.920 | Strong rank-ordering: the model reliably separates high-risk from low-risk loans |
-| **PR-AUC** | 0.975 | High precision at all recall levels; few false negatives in the top-ranked cohort |
-| **Brier Score** | 0.114 | Well-calibrated probabilities; a 60% prediction corresponds to ~60% observed distress |
-| **Log Loss** | 0.352 | Proper scoring rule confirms the model's probability estimates are informative |
+## Key Results
 
-*Note: Trained on synthetic data with idiosyncratic shocks. Production deployment on real CMBS tape data would require re-training and re-validation.*
-
-### What This System Does
-
-1. **Ingests** a mix of real market data (Treasury rates, market cap rates) and synthetic CMBS-style loan data into a Delta Lake bronze layer.
-2. **Cleans, joins, and enriches** data through a silver layer using PySpark and dbt.
-3. **Produces a gold layer** with two consumption models:
-   - Loan-level distress probability scores (XGBoost classifier + survival analysis for time-to-distress)
-   - Market-level distress indices (aggregate risk by metro and vintage)
-4. **Runs stress-test scenarios**: rate shocks (+100/+200/+300 bps) and cap-rate expansion shocks (+100/+200 bps) — recomputes refinance viability under each.
-5. **Outputs a ranked portfolio dashboard** flagging loans by distress tier with SHAP explanations.
-6. **Ships with SR 11-7 style** model risk management documentation.
+| Component | Metric | Value |
+|-----------|--------|-------|
+| **Classifier** | AUC-ROC | 0.9202 |
+| | PR-AUC | 0.9765 |
+| | Brier Score | 0.1069 |
+| | Log Loss | 0.3513 |
+| **Survival** | Concordance (test) | 0.9399 |
+| **Stress Test** | Baseline distressed | 52.9% |
+| | Combined severe | 84.4% (+31.5pp) |
+| | UPB at risk increase | $155B → $238B |
+| **SHAP** | Top driver | `cap_rate_at_Tobs` |
+| **Portfolio** | Synthetic loans | 10,000 |
 
 ---
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          DATA SOURCES                                        │
-│  ┌──────────────────┐   ┌──────────────────────┐                           │
-│  │ Synthetic Loan   │   │ Market Data APIs     │                           │
-│  │ Generator        │   │ (FRED, Cap Rates)    │                           │
-│  └────────┬─────────┘   └──────────┬───────────┘                           │
-└───────────┼──────────────────────────┼──────────────────────────────────────┘
-            │                          │
-            ▼                          ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                       BRONZE LAYER (Raw Ingestion)                           │
-│  Delta Lake: bronze_loans, bronze_treasury_rates, bronze_cap_rates          │
-└────────────────────────────────────┬────────────────────────────────────────┘
-                                     │  PySpark ETL
-                                     ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                       SILVER LAYER (Cleaned & Enriched)                      │
-│  Delta Lake: silver_loans, silver_market_rates, silver_loan_features        │
-└────────────────────────────────────┬────────────────────────────────────────┘
-                                     │  dbt + ML Scoring
-                                     ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                       GOLD LAYER (Consumption Models)                        │
-│  gold_loan_scores │ gold_market_indices │ gold_stress_results               │
-└────────────────────────────────────┬────────────────────────────────────────┘
-                                     │
-              ┌──────────────────────┼──────────────────────┐
-              ▼                      ▼                      ▼
-┌──────────────────┐    ┌────────────────────┐    ┌─────────────────────┐
-│ ML Layer         │    │ Stress Engine      │    │ Power BI Dashboard  │
-│ XGBoost+Survival │    │ Rate/Cap Scenarios │    │ Direct or Export    │
-└──────────────────┘    └────────────────────┘    └─────────────────────┘
+```mermaid
+graph LR
+  A[FRED Treasury/SOFR] --> B[Bronze Delta]
+  C[Synthetic Loan Generator] --> B
+  B --> D[Silver Delta<br/>PySpark + Feature Eng]
+  D --> E[Gold Delta<br/>dbt models]
+  E --> F[XGBoost Classifier<br/>Optuna HPO]
+  E --> G[Cox PH Survival<br/>lifelines]
+  E --> H[Stress Engine<br/>8 scenarios]
+  F --> I[SHAP Explainer]
+  F --> J[MLflow Registry<br/>@Staging alias]
+  G --> J
+  H --> K[Power BI Export<br/>Star Schema]
+  I --> K
+  E --> K
 ```
 
 ---
 
-## Tech Stack
+## Repo Tour
 
-| Layer | Technology | Purpose |
-|-------|-----------|---------|
-| Runtime | Python 3.11 | Primary language |
-| Compute | PySpark 3.5 | Distributed data processing |
-| Storage | Delta Lake 3.x | ACID lakehouse tables |
-| Transform | dbt-spark | SQL transformations (Silver → Gold) |
-| ML — Classification | XGBoost | Distress probability |
-| ML — Survival | lifelines | Time-to-distress |
-| ML — Tracking | MLflow | Experiments & model registry |
-| Explainability | SHAP | Feature attribution |
-| Tuning | Optuna | Hyperparameter optimization |
-| Dashboard | Power BI | Portfolio risk visualization |
-| Testing | pytest | Unit & integration tests |
-| Linting | ruff | Code quality |
-| Types | mypy | Static type analysis |
+```
+cre-refinancing-distress-warning/
+├── config/                    # YAML configs (loan generator, stress scenarios)
+├── src/
+│   ├── ingestion/             # Bronze: loan generator + market data fetcher
+│   ├── transformations/       # Silver: PySpark cleaning + feature engineering
+│   ├── models/                # XGBoost classifier + Cox PH survival + features.py
+│   ├── stress_testing/        # 8-scenario stress engine + aggregate reporting
+│   ├── explainability/        # SHAP computation + per-loan explanations
+│   ├── exports/               # Power BI star schema exporter
+│   └── utils/                 # Delta writer/reader, YAML parser
+├── dbt/                       # dbt project (Silver → Gold SQL models)
+├── scripts/                   # Pipeline orchestrator + run_gold + run_dbt.sh
+├── tests/                     # 120 unit + integration tests
+├── docs/
+│   ├── analysis/              # Modeling journey, distress diagnostics, stress results
+│   └── model_risk_management/ # SR 11-7 documentation (7 sections + SHAP figures)
+├── powerbi/                   # Data model spec, DAX library, page specs, connection guides
+├── models/evaluation/         # JSON metrics from classifier + survival training
+└── reports/                   # stress_summary.csv
+```
 
 ---
 
 ## Quickstart
 
-### Prerequisites
-
-- Python 3.11+
-- Java 11+ (required by PySpark)
-- A FRED API key ([get one here](https://fred.stlouisfed.org/docs/api/api_key.html))
-
-### Installation
-
 ```bash
-# Clone the repository
-git clone <repo-url> cre-distress-warning
-cd cre-distress-warning
+# Clone
+git clone https://github.com/lakshithask2024/cre-refinancing-distress-warning.git
+cd cre-refinancing-distress-warning
 
-# Create and activate virtual environment
-python -m venv .venv
-source .venv/bin/activate  # Linux/macOS
-# .venv\Scripts\activate   # Windows
-
-# Install all dependencies (core + dev)
+# Environment
+conda create -n cre-distress python=3.11 -y && conda activate cre-distress
 pip install -e ".[dev]"
+# Or: pip install -r requirements.txt
 
-# Configure environment
-cp .env.example .env
-# Edit .env and add your FRED_API_KEY
-```
+# Set MLflow backend
+export MLFLOW_TRACKING_URI="sqlite:///mlflow.db"
 
-### Run the Pipeline
+# ─── Generate Data ───────────────────────────────────────────────────────────
+python -m src.ingestion.synthetic_loan_generator --output data/bronze/loans/ --size 5000
+python -m src.ingestion.market_data_fetcher --output data/bronze/market/ --offline
+python -m src.transformations.run_silver
+python scripts/run_gold_models.py
 
-```bash
-# Full end-to-end pipeline (Bronze → Silver → Gold → Model → Stress → Export)
-python scripts/run_pipeline.py
-
-# Or run individual stages:
-python scripts/run_pipeline.py --stage bronze
-python scripts/run_pipeline.py --stage silver
-python scripts/run_pipeline.py --stage gold
-python scripts/run_pipeline.py --stage model
-python scripts/run_pipeline.py --stage stress
-python scripts/run_pipeline.py --stage export
-```
-
-### Run Tests
-
-```bash
-# All tests
-pytest
-
-# Unit tests only
-pytest tests/unit/ -m unit
-
-# With coverage report
-pytest --cov=src --cov-report=html
-```
-
----
-
-## Stress Testing
-
-Run all 8 scenarios against the current portfolio:
-
-```bash
-python -m src.stress_testing.stress_cli run-all
-# Or a subset:
-python -m src.stress_testing.stress_cli run-all --scenarios baseline,combined_severe,office_specific
-```
-
-### Scenario Definitions
-
-| Scenario | Rate Shock | Cap Rate Shock | NOI Shock | Macro Interpretation |
-|----------|-----------|---------------|-----------|---------------------|
-| **baseline** | 0 | 0 | 0% | Current conditions (control) |
-| **rate_shock_100bps** | +100 bps | 0 | 0% | Moderate Fed tightening |
-| **rate_shock_200bps** | +200 bps | 0 | 0% | Sustained higher-for-longer |
-| **rate_shock_300bps** | +300 bps | 0 | 0% | Severe monetary tightening |
-| **cap_rate_shock_100bps** | 0 | +100 bps | 0% | Mild investor risk repricing |
-| **cap_rate_shock_200bps** | 0 | +200 bps | 0% | CRE market correction |
-| **combined_severe** | +200 bps | +200 bps | -10% | Full recession + CRE crash |
-| **office_specific** | 0 | +300 bps (office) | -20% (office) | Remote-work structural shift |
-
-### Outputs
-
-- `data/gold/stress_test_results/` — Per-loan predictions by scenario (Delta, partitioned by scenario_name)
-- `data/gold/stress_test_summary/` — Portfolio-level aggregates (Delta)
-- `reports/stress_summary.csv` — Human-readable CSV for reporting
-- `docs/analysis/stress_test_results.md` — Markdown results table
-
----
-
-## Training the Model
-
-### Prerequisites
-
-Verify all ML libraries are installed:
-
-```bash
-python -c "import xgboost, optuna, mlflow, shap"
-```
-
-If any import fails, install with:
-
-```bash
-pip install xgboost optuna mlflow shap scikit-learn pandas numpy pyarrow
-```
-
-### Training Command
-
-```bash
+# ─── Train Models ────────────────────────────────────────────────────────────
 python -m src.models.train_cli --experiment-name cre_distress
-```
+python -m src.models.survival_cli
 
-Options:
-- `--n-trials 20` — Number of Optuna HPO trials (default: 20)
-- `--seed 42` — Random seed for reproducibility
-- `--gold-path data/gold/loan_distress_history` — Path to Gold table
+# ─── Explainability ──────────────────────────────────────────────────────────
+python -m src.explainability.shap_cli
 
-### Expected Runtime
+# ─── Stress Testing ──────────────────────────────────────────────────────────
+python -m src.stress_testing.stress_cli run-all
 
-~3-5 minutes on a laptop for 20 Optuna trials on a 5,000-loan portfolio.
+# ─── Power BI Export ─────────────────────────────────────────────────────────
+python -m src.exports.powerbi_exporter --gold-path data/gold --output data/exports/powerbi/
 
-### Inspecting Results
-
-```bash
-# Launch the MLflow tracking UI
-mlflow ui
+# ─── Inspect Results ─────────────────────────────────────────────────────────
+mlflow ui --backend-store-uri sqlite:///mlflow.db
 # Opens at http://localhost:5000
 ```
 
-The training run logs:
-- All hyperparameters (best + per-trial)
-- Test metrics: AUC, PR-AUC, Brier score, log loss
-- Artifacts: feature importance plot, calibration curve, confusion matrix
-- Registered model: `cre_distress_classifier` in MLflow Model Registry
-
-### Metrics Output
-
-Machine-readable evaluation summary:
-```
-models/evaluation/distress_classifier_metrics.json
-```
+Expected runtime: ~5 minutes for data generation + training on a laptop.
 
 ---
 
-### Code Quality
+## SHAP Explainability Figures
 
-```bash
-# Lint
-ruff check .
+### Global Feature Importance
+![SHAP Global Importance](docs/model_risk_management/figures/shap_global_importance.png)
 
-# Format
-ruff format .
+### Feature Effect Summary (Beeswarm)
+![SHAP Beeswarm](docs/model_risk_management/figures/shap_beeswarm.png)
 
-# Type check
-mypy src/
-```
+### Dependence: LTV at Observation
+![SHAP LTV Dependence](docs/model_risk_management/figures/shap_dependence_current_ltv_at_Tobs.png)
+
+### Dependence: DSCR at Observation
+![SHAP DSCR Dependence](docs/model_risk_management/figures/shap_dependence_current_dscr_at_Tobs.png)
 
 ---
 
-## Repository Structure
+## Documentation Map
 
-```
-cre-distress-warning/
-├── README.md                         # This file
-├── pyproject.toml                    # Project metadata & dependencies
-├── .gitignore                        # VCS ignore rules
-├── .env.example                      # Environment variable template
-│
-├── config/                           # Configuration
-│   ├── __init__.py
-│   ├── settings.py                   # Pydantic settings loader
-│   ├── loan_generator.yaml           # Synthetic data parameters
-│   └── stress_scenarios.yaml         # Stress scenario definitions
-│
-├── data/                             # Data lake (gitignored)
-│   ├── bronze/                       # Raw ingested data
-│   ├── silver/                       # Cleaned & enriched
-│   ├── gold/                         # Consumption layer
-│   └── exports/
-│       └── powerbi/                  # Parquet/CSV for Power BI
-│
-├── src/                              # Source code
-│   ├── __init__.py
-│   ├── ingestion/                    # Bronze layer ETL
-│   ├── transformations/              # Silver layer PySpark jobs
-│   ├── models/                       # ML models (XGBoost, survival)
-│   ├── stress_testing/               # Stress scenario engine
-│   ├── explainability/               # SHAP explanations
-│   ├── exports/                      # Power BI export pipeline
-│   └── utils/                        # Shared utilities
-│
-├── dbt/                              # dbt project (Silver → Gold)
-│   ├── dbt_project.yml
-│   ├── profiles.yml.example
-│   └── models/
-│       ├── staging/
-│       └── marts/
-│
-├── notebooks/                        # Exploratory analysis
-├── powerbi/                          # Dashboard documentation
-│   └── reports/                      # .pbix files
-│
-├── docs/                             # Documentation
-│   ├── model_risk_management/        # SR 11-7 documentation
-│   └── screenshots/                  # Dashboard screenshots
-│
-├── tests/                            # Test suite
-│   ├── unit/                         # Fast, isolated tests
-│   └── integration/                  # End-to-end pipeline tests
-│
-└── scripts/                          # CLI entry points
-    ├── run_pipeline.py               # Pipeline orchestrator
-    ├── run_dbt.sh                    # dbt Gold layer build (with Python fallback)
-    └── run_gold_models.py            # Sandbox Gold materializer (SQLite-based)
-```
+| Document | Purpose |
+|----------|---------|
+| [`docs/analysis/modeling_journey.md`](docs/analysis/modeling_journey.md) | v1→v4 iteration history + MLflow hygiene post-v4 |
+| [`docs/analysis/distress_tier_diagnostics.md`](docs/analysis/distress_tier_diagnostics.md) | Rule-based vs ML: when to use each |
+| [`docs/analysis/stress_test_results.md`](docs/analysis/stress_test_results.md) | 8-scenario stress test results |
+| [`docs/model_risk_management/`](docs/model_risk_management/) | SR 11-7 documentation (7 sections) |
+| [`powerbi/`](powerbi/) | Data model, DAX measures, page specs, connection guides |
+| [`models/evaluation/`](models/evaluation/) | JSON metrics from training runs |
 
 ---
 
 ## Environment Notes
 
-**dbt models use DuckDB in sandbox environments and Spark in Databricks production — both targets are defined in `dbt/profiles.yml.example`.**
+| Requirement | Version | Notes |
+|-------------|---------|-------|
+| Python | 3.11 | Required (type hints, match statements) |
+| Java | 17+ | Required by PySpark |
+| libomp | latest | Required for XGBoost on macOS (`brew install libomp`) |
+| MLflow | 3.x | Uses SQLite backend (`sqlite:///mlflow.db`) |
+| Power BI Desktop | Latest | Windows-only; report specs enable building the .pbix |
 
-- **Sandbox (`--target sandbox`):** dbt-duckdb reads Silver Parquet files and writes Gold tables locally.
-- **Production (`--target production`):** dbt-spark connects to a Databricks SQL Warehouse, reads from the Unity Catalog `silver` schema, and writes Delta tables to the `gold` schema.
-- SQL is ANSI-compatible across both adapters; any dialect-specific adjustments are noted in `dbt/profiles.yml.example`.
-
----
-
-## Configuration
-
-The system is configured through:
-
-1. **Environment variables** (`.env` file) — API keys, paths, Spark settings
-2. **YAML files** (`config/`) — Loan generation params, stress scenarios
-3. **Pydantic validation** (`config/settings.py`) — Type-safe, fails fast on misconfiguration
-
-See `.env.example` for all available environment variables.
+The project uses `pyproject.toml` for dependency management. Install with `pip install -e ".[dev]"` or use the pinned `requirements.txt`.
 
 ---
 
-## Dashboard
+## What I Learned / Would Do Differently
 
-The Power BI dashboard supports two connectivity patterns:
+**What was hard:** Label leakage was more subtle than expected. The initial model achieved AUC 1.0 — not because the model was brilliant, but because the label was a deterministic function of the input features. Diagnosing target-definition leakage (vs. direct-feature leakage) required three iterations. Separately, MLflow 3.x's silent transition from stages to aliases broke all model loaders until post-registration artifact-load verification was added.
 
-| Pattern | Use Case | Setup |
-|---------|----------|-------|
-| **Direct Databricks** | Production | Connect Power BI to Databricks SQL endpoint via ODBC |
-| **File-based import** | Review / Development | Load Parquet/CSV exports from `data/exports/powerbi/` |
-
-Dashboard documentation lives in `powerbi/` including star schema spec, DAX measures, and page layouts.
-
----
-
-## Model Risk Management
-
-SR 11-7 compliant model risk management documentation in [`docs/model_risk_management/`](docs/model_risk_management/):
-
-| Section | Document | Content |
-|---------|----------|---------|
-| 1 | `01_model_overview.md` | Purpose, intended users, in/out-of-scope decisions, governance |
-| 2 | `02_data_and_assumptions.md` | Data lineage, key assumptions (7), known limitations (6) |
-| 3 | `03_methodology.md` | Architecture, 24-feature set, hyperparameters, rationale |
-| 4 | `04_performance_and_validation.md` | Test metrics (AUC 0.92), SHAP plots, backtesting, calibration |
-| 5 | `05_limitations_and_conservative_use.md` | 8 explicit limitations, PD thresholds, prohibited uses |
-| 6 | `06_monitoring_plan.md` | PSI/KS thresholds, retraining triggers, governance roles |
-| 7 | `07_stress_testing_appendix.md` | 8 scenarios, results table, cap rate dominance finding |
+**What I'd change for production:** For real deployment, I would use a stochastic property value model with comparable sales adjustments rather than deterministic NOI/cap_rate. I would engineer a shared `featurize()` function from day one (rather than retrofitting it after the stress engine couldn't reuse the training pipeline). I would use dbt-core with dbt-databricks and Unity Catalog from the start, not the local SQLite + JSON-lines fallback that was necessary for sandbox development. And I would build the monitoring harness (PSI, KS, rolling AUC) as automated checks in CI rather than documenting them as future work.
 
 ---
 
