@@ -140,6 +140,62 @@ pytest tests/unit/ -m unit
 pytest --cov=src --cov-report=html
 ```
 
+---
+
+## Training the Model
+
+### Prerequisites
+
+Verify all ML libraries are installed:
+
+```bash
+python -c "import xgboost, optuna, mlflow, shap"
+```
+
+If any import fails, install with:
+
+```bash
+pip install xgboost optuna mlflow shap scikit-learn pandas numpy pyarrow
+```
+
+### Training Command
+
+```bash
+python -m src.models.train_cli --experiment-name cre_distress
+```
+
+Options:
+- `--n-trials 20` — Number of Optuna HPO trials (default: 20)
+- `--seed 42` — Random seed for reproducibility
+- `--gold-path data/gold/loan_distress_history` — Path to Gold table
+
+### Expected Runtime
+
+~3-5 minutes on a laptop for 20 Optuna trials on a 5,000-loan portfolio.
+
+### Inspecting Results
+
+```bash
+# Launch the MLflow tracking UI
+mlflow ui
+# Opens at http://localhost:5000
+```
+
+The training run logs:
+- All hyperparameters (best + per-trial)
+- Test metrics: AUC, PR-AUC, Brier score, log loss
+- Artifacts: feature importance plot, calibration curve, confusion matrix
+- Registered model: `cre_distress_classifier` in MLflow Model Registry
+
+### Metrics Output
+
+Machine-readable evaluation summary:
+```
+models/evaluation/distress_classifier_metrics.json
+```
+
+---
+
 ### Code Quality
 
 ```bash
