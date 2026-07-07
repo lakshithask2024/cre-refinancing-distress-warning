@@ -191,3 +191,77 @@ This analysis informs several modeling decisions:
 ---
 
 *This document will be incorporated into the SR 11-7 Model Risk Management documentation (Milestone 9) under the "Model Assumptions and Limitations" and "Data Description" sections.*
+
+
+
+---
+
+## 7. Model vs. Rule: When to Use Each
+
+The system provides two complementary risk assessment approaches. Understanding when to use each is critical for effective portfolio management.
+
+### Rule-Based Tiers (Gold layer: `distress_tier`)
+
+**Characteristics:**
+- Deterministic, transparent, fully auditable
+- Based on well-understood financial metrics (DSCR, LTV)
+- Identical inputs always produce identical outputs
+- No model risk — just threshold logic
+
+**Best for:**
+- **Policy triggers:** "All critical-tier loans require monthly reporting"
+- **Reserve staging under CECL:** Assign higher loss provisions based on tier
+- **Regulatory reporting:** Auditors can independently verify tier assignments
+- **Hard limits:** "No new lending to properties in critical tier"
+
+**Limitation:** Cannot capture interaction effects. A 0.85 LTV office loan in a secondary metro with an IO structure and C-tier sponsor is far riskier than a 0.85 LTV industrial loan in a gateway market — but both get the same tier under the rule.
+
+### ML Distress Probability (XGBoost classifier output)
+
+**Characteristics:**
+- Probabilistic (0.0-1.0 continuous score)
+- Captures multivariate interactions and nonlinearities
+- Trained to predict forward-looking maturity outcomes
+- Requires ongoing validation and governance (SR 11-7)
+
+**Best for:**
+- **Rank-ordering within a tier:** "Among 500 critical-tier loans, which 50 should the workout team call first?"
+- **Portfolio-level loss estimation:** Aggregate probability-weighted exposure
+- **Early warning at the margin:** Identifying medium-tier loans approaching distress
+- **SHAP-based explanations:** Understanding *why* a specific loan is high-risk
+
+**Limitation:** Model risk (potential for degradation, drift, or misspecification). Requires MRM documentation, ongoing monitoring, and periodic revalidation.
+
+### Recommended Integrated Usage
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  STEP 1: RULE-BASED STAGING                                  │
+│  Assign distress_tier (critical/high/medium/low)             │
+│  → Hard policy triggers activate                             │
+│  → Reserve provisioning by tier                              │
+└─────────────────────────────┬───────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│  STEP 2: ML-BASED PRIORITIZATION (within each tier)          │
+│  Score loans with XGBoost distress probability               │
+│  → Rank-order within tier for workout attention              │
+│  → Surface SHAP explanations for credit officer review       │
+└─────────────────────────────┬───────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│  STEP 3: HUMAN CREDIT REVIEW                                 │
+│  Credit committee evaluates top-ranked loans                 │
+│  → Incorporates qualitative factors (sponsor relationship,   │
+│    market intelligence, renovation plans)                     │
+│  → Makes disposition decision (modify, extend, foreclose)    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Key principle:** Rules set the boundaries. ML prioritizes within them. Humans decide.
+
+---
+
+*This integrated framework ensures the model adds value (better prioritization) while maintaining the transparency and auditability required by bank examiners and SR 11-7 governance.*

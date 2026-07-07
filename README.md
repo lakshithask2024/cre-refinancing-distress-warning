@@ -12,6 +12,29 @@ Banks, CMBS bondholders, and special servicers need to identify which loans are 
 
 Manual loan-by-loan analysis does not scale to portfolios containing thousands of loans. This system automates the identification and prioritization of refinancing distress risk across large commercial real estate portfolios.
 
+### Model Purpose and Positioning
+
+The XGBoost distress classifier is a **risk stratification tool** — it rank-orders loans by refinancing distress probability 24 months before maturity, enabling credit risk teams to:
+
+- Prioritize workout efforts (focus attention on the top quintile first)
+- Stage reserve allocations under CECL (assign higher loss provisions to high-probability loans)
+- Route loans to special servicing before maturity triggers a hard default
+
+**This is NOT a standalone default-decision engine.** The model output feeds into human-led credit review, analogous to how banks use PD models for allowance staging — not for automatic loan foreclosure. All disposition decisions remain with the credit committee.
+
+Model governance follows the **SR 11-7 / OCC 2011-12** framework for model risk management. See [`docs/model_risk_management/`](docs/model_risk_management/) for the full MRM documentation package.
+
+### Model Performance (v4)
+
+| Metric | Value | Interpretation |
+|--------|-------|----------------|
+| **AUC-ROC** | 0.920 | Strong rank-ordering: the model reliably separates high-risk from low-risk loans |
+| **PR-AUC** | 0.975 | High precision at all recall levels; few false negatives in the top-ranked cohort |
+| **Brier Score** | 0.114 | Well-calibrated probabilities; a 60% prediction corresponds to ~60% observed distress |
+| **Log Loss** | 0.352 | Proper scoring rule confirms the model's probability estimates are informative |
+
+*Note: Trained on synthetic data with idiosyncratic shocks. Production deployment on real CMBS tape data would require re-training and re-validation.*
+
 ### What This System Does
 
 1. **Ingests** a mix of real market data (Treasury rates, market cap rates) and synthetic CMBS-style loan data into a Delta Lake bronze layer.
