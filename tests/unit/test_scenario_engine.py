@@ -312,3 +312,120 @@ class TestScoringSmoke:
         assert "stressed_distress_tier" in scored.columns
         assert len(scored) == 100
         assert scored["stressed_pd"].between(0, 1).all()
+
+
+
+class TestMarketOverrideEffect:
+    """Test that market_override in featurize_for_scoring actually changes features."""
+
+    def test_rate_shock_produces_delta(self, sample_portfolio):
+        """rate_shock_100bps should produce different feature values than baseline."""
+        from src.models.features import featurize_for_scoring, NUMERIC_FEATURES_AT_TOBS
+        from src.utils.delta_writer import DeltaWriter, DeltaReader
+        import tempfile, os
+
+        # Create a minimal market fixture
+        market_records = []
+        for year in range(2015, 2026):
+            for month in range(1, 13):
+                market_records.append({
+                    "data_type": "treasury_10y",
+                    "observation_date": f"{year}-{month:02d}-01",
+                    "value": 2.0 + (year - 2015) * 0.2,
+                    "frequency": "monthly",
+                    "property_type": None,
+                    "metro": None,
+                    "_silver_processed_at": "2026-01-01",
+                })
+        for ptype in ["office", "retail", "industrial", "multifamily", "hotel"]:
+            base = {"office": 6.5, "retail": 6.8, "industrial": 5.5, "multifamily": 5.2, "hotel": 7.5}[ptype]
+            for year in range(2015, 2026):
+                for q in range(1, 5):
+                    month = {1: 2, 2: 5, 3: 8, 4: 11}[q]
+                    market_records.append({
+                        "data_type": "cap_rate",
+                        "observation_date": f"{year}-{month:02d}-15",
+                        "value": base + (year - 2015) * 0.1,
+                        "frequency": "quarterly",
+                        "property_type": ptype,
+                        "metro": "National",
+                        "_silver_processed_at": "2026-01-01",
+                    })
+        market_df = pd.DataFrame(market_records)
+
+        # Add required date columns to sample portfolio
+        loans = sample_portfolio.copy()
+        loans["origination_date"] = "2017-06-15"
+        loans["maturity_date"] = "2022-06-15"
+
+        feature_names = NUMERIC_FEATURES_AT_TOBS + ["metro_encoded"]
+
+        # Baseline (no shock)
+        X_baseline = featurize_for_scoring(
+            loans_df=loans, market_df=market_df,
+            model_feature_names=feature_names,
+            market_override=None,
+        )
+
+        # Shocked (+100bps rate)
+        X_shocked = featurize_for_scoring(
+            loans_df=loans, market_df=market_df,
+            model_feature_names=feature_names,
+            market_override={"treasury_10y_delta_bps": 100},
+        )
+
+        # treasury_10y_at_Tobs should be 1.0 higher (100bps = 1 percentage point)
+        treasury_diff = X_shocked["treasury_10y_at_Tobs"] - X_baseline["treasury_10y_at_Tobs"]
+        assert (treasury_diff.abs() > 0.9).all(), (
+            f"Treasury shock not applied. Diff: {treasury_diff.values}"
+        )
+
+        # rate_gap should be wider
+        gap_diff = X_shocked["rate_gap_bps_at_Tobs"] - X_baseline["rate_gap_bps_at_Tobs"]
+        assert (gap_diff > 50).all(), (
+            f"Rate gap not increased by shock. Diff: {gap_diff.values}"
+        )
+
+        # DSCR should be lower (higher rate → higher debt service → lower coverage)
+        dscr_diff = X_shocked["current_dscr_at_Tobs"] - X_baseline["current_dscr_at_Tobs"]
+        assert (dscr_diff < 0).all(), (
+            f"DSCR should decrease with rate shock. Diff: {dscr_diff.values}"
+        )
+
+    def test_cap_rate_shock_increases_ltv(self, sample_portfolio):
+        """cap_rate_shock should increase LTV (lower value → higher leverage)."""
+        from src.models.features import featurize_for_scoring, NUMERIC_FEATURES_AT_TOBS
+
+        market_records = []
+        for year in range(2015, 2026):
+            for month in range(1, 13):
+                market_records.append({
+                    "data_type": "treasury_10y",
+                    "observation_date": f"{year}-{month:02d}-01",
+                    "value": 3.0,
+                    "frequency": "monthly", "property_type": None,
+                    "metro": None, "_silver_processed_at": "2026-01-01",
+                })
+        for ptype in ["office", "retail", "industrial", "multifamily", "hotel"]:
+            for year in range(2015, 2026):
+                for q in range(1, 5):
+                    month = {1: 2, 2: 5, 3: 8, 4: 11}[q]
+                    market_records.append({
+                        "data_type": "cap_rate",
+                        "observation_date": f"{year}-{month:02d}-15",
+                        "value": 6.0, "frequency": "quarterly",
+                        "property_type": ptype, "metro": "National",
+                        "_silver_processed_at": "2026-01-01",
+                    })
+        market_df = pd.DataFrame(market_records)
+
+        loans = sample_portfolio.copy()
+        loans["origination_date"] = "2017-06-15"
+        loans["maturity_date"] = "2022-06-15"
+        feature_names = NUMERIC_FEATURES_AT_TOBS + ["metro_encoded"]
+
+        X_base = featurize_for_scoring(loans, market_df, feature_names, market_override=None)
+        X_cap = featurize_for_scoring(loans, market_df, feature_names, market_override={"cap_rate_delta_bps": 200})
+
+        ltv_diff = X_cap["current_ltv_at_Tobs"] - X_base["current_ltv_at_Tobs"]
+        assert (ltv_diff > 0).all(), f"LTV should increase with cap rate shock. Diff: {ltv_diff.values}"

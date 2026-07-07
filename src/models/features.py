@@ -722,6 +722,7 @@ def featurize_for_scoring(
     model_feature_names: list[str],
     metro_means: dict[str, float] | None = None,
     global_mean: float = 0.5,
+    market_override: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
     """
     Featurize a raw loans DataFrame for model scoring (inference, not training).
@@ -732,16 +733,23 @@ def featurize_for_scoring(
     Steps:
       1. Parse dates, compute T_obs
       2. Compute features at T_obs (treasury, cap rates, LTV, DSCR)
-      3. Apply one-hot encoding for categoricals
-      4. Apply metro target encoding (using provided means or global fallback)
-      5. Align columns to match model_feature_names exactly
+      3. Apply market_override shocks to engineered features (stress testing)
+      4. Recompute dependent features (LTV, DSCR, rate_gap) from shocked values
+      5. Apply one-hot encoding for categoricals
+      6. Apply metro target encoding (using provided means or global fallback)
+      7. Align columns to match model_feature_names exactly
 
     Args:
-        loans_df: Raw loan records (may have shocks already applied to noi, cap_rate, etc.)
+        loans_df: Raw loan records
         market_df: Silver market rates (for T_obs market lookups)
-        model_feature_names: Exact column names the model expects (from model.get_booster().feature_names)
-        metro_means: dict of metro → target-encoded value (from training). If None, uses global_mean.
+        model_feature_names: Exact column names the model expects
+        metro_means: dict of metro → target-encoded value. If None, uses global_mean.
         global_mean: Fallback target encoding value (default 0.5)
+        market_override: Optional stress scenario overrides. Supported keys:
+            - treasury_10y_delta_bps: int (e.g., 200 for +200bps rate shock)
+            - cap_rate_delta_bps: int (e.g., 100 for +100bps cap rate expansion)
+            - noi_multiplier: float (e.g., 0.90 for -10% NOI shock)
+            - property_type_filter: str or None (if set, shocks only apply to this type)
 
     Returns:
         Feature matrix (pd.DataFrame) with columns matching model_feature_names exactly.
@@ -757,10 +765,69 @@ def featurize_for_scoring(
     df["origination_date_parsed"] = pd.to_datetime(df["origination_date"], errors="coerce")
     df["T_obs"] = df["maturity_date_parsed"] - pd.Timedelta(days=730)
 
-    # Compute features at T_obs
+    # Compute features at T_obs (baseline, from historical market data)
     df = _compute_features_at_Tobs(df, treasury_lookup, cap_rate_lookup)
 
-    # Metro target encoding
+    # ─── Apply market overrides (stress testing) ──────────────────────────────
+    if market_override:
+        rate_delta = float(market_override.get("treasury_10y_delta_bps", 0))
+        cap_delta = float(market_override.get("cap_rate_delta_bps", 0))
+        noi_mult = float(market_override.get("noi_multiplier", 1.0))
+        ptype_filter = market_override.get("property_type_filter")
+
+        # Determine which rows are affected
+        if ptype_filter:
+            mask = df["property_type"].astype(str).str.lower() == ptype_filter.lower()
+        else:
+            mask = pd.Series(True, index=df.index)
+
+        # Apply treasury rate shock → affects rate_gap and DSCR
+        if rate_delta != 0:
+            df.loc[mask, "treasury_10y_at_Tobs"] += rate_delta / 100.0  # bps to pct
+
+        # Apply cap rate shock → affects LTV
+        if cap_delta != 0:
+            df.loc[mask, "cap_rate_at_Tobs"] += cap_delta / 100.0  # bps to pct
+            df.loc[mask, "cap_rate_delta_since_origination_at_Tobs"] += cap_delta / 100.0
+
+        # Apply NOI multiplier → affects both LTV and DSCR
+        # Store modified NOI for recomputation
+        noi = pd.to_numeric(df["noi_annual"], errors="coerce").fillna(0).copy()
+        if noi_mult != 1.0:
+            noi.loc[mask] = noi.loc[mask] * noi_mult
+
+        # ─── Recompute dependent features from shocked values ─────────────────
+
+        # Recompute refi rate at T_obs
+        df["refi_rate_at_Tobs"] = df.apply(
+            lambda row: (row["treasury_10y_at_Tobs"] + REFI_SPREAD_BPS.get(
+                str(row.get("property_type", "office")).lower(), 250
+            ) / 100.0) / 100.0,
+            axis=1,
+        )
+
+        # Recompute rate gap
+        df["rate_gap_bps_at_Tobs"] = (df["refi_rate_at_Tobs"] - df["note_rate"]) * 10000
+
+        # Recompute LTV at T_obs: balance / (NOI / cap_rate)
+        balance = pd.to_numeric(df["current_balance"], errors="coerce").fillna(
+            pd.to_numeric(df["original_balance"], errors="coerce").fillna(0)
+        )
+        cap_decimal = df["cap_rate_at_Tobs"] / 100.0
+        value_at_Tobs = np.where(cap_decimal > 0, noi / cap_decimal, 0)
+        df["current_ltv_at_Tobs"] = np.where(value_at_Tobs > 0, balance / value_at_Tobs, 0)
+
+        # Recompute DSCR at T_obs: NOI / debt_service(refi_rate)
+        refi_rate = df["refi_rate_at_Tobs"].values
+        is_io = (df["amortization_type"].astype(str) == "interest_only").values
+        ds = np.where(
+            is_io,
+            balance.values * refi_rate,
+            _amort_annual_ds_vectorized(balance.values, refi_rate),
+        )
+        df["current_dscr_at_Tobs"] = np.where(ds > 0, noi.values / ds, 0)
+
+    # ─── Metro target encoding ────────────────────────────────────────────────
     if metro_means:
         df["metro_encoded"] = df["metro_area"].map(metro_means).fillna(global_mean)
     else:

@@ -205,12 +205,14 @@ def score_portfolio(
     model: Any,
     feature_names: list[str],
     market_df: pd.DataFrame | None = None,
+    market_override: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
     """
     Score loans using the XGBoost model under stressed features.
 
-    Uses featurize_for_scoring() from the features module to ensure the feature
-    matrix exactly matches what the model was trained on.
+    Uses featurize_for_scoring() with market_override to apply stress shocks
+    INSIDE the featurization pipeline, ensuring derived features (LTV, DSCR,
+    rate_gap) are properly recomputed from the shocked market variables.
     """
     from src.models.features import featurize_for_scoring, _load_delta_as_df
 
@@ -222,6 +224,7 @@ def score_portfolio(
         loans_df=df,
         market_df=market_df,
         model_feature_names=feature_names,
+        market_override=market_override,
     )
 
     # Sanity check: columns must match exactly
@@ -252,11 +255,29 @@ def run_scenario(
     """Execute a single stress scenario end-to-end."""
     name = scenario.get("name", "unknown")
 
-    # Apply shocks to raw economic variables
-    stressed = apply_scenario(portfolio, scenario)
+    # Build market_override from scenario definition
+    # This is passed to featurize_for_scoring() to shock the engineered features
+    market_override: dict[str, Any] = {}
+    rate_shock = float(scenario.get("rate_shock_bps", 0))
+    cap_shock = float(scenario.get("cap_rate_shock_bps", 0))
+    noi_shock = float(scenario.get("noi_shock_pct", 0.0))
+    ptype_filter = scenario.get("property_type_filter")
 
-    # Score (featurizes internally using market data)
-    stressed = score_portfolio(stressed, model, feature_names, market_df=market_df)
+    if rate_shock != 0:
+        market_override["treasury_10y_delta_bps"] = rate_shock
+    if cap_shock != 0:
+        market_override["cap_rate_delta_bps"] = cap_shock
+    if noi_shock != 0:
+        market_override["noi_multiplier"] = 1.0 + noi_shock  # e.g., -0.10 → 0.90
+    if ptype_filter and ptype_filter != "null":
+        market_override["property_type_filter"] = ptype_filter
+
+    # Score with market override (shocks applied inside featurization)
+    stressed = score_portfolio(
+        portfolio, model, feature_names,
+        market_df=market_df,
+        market_override=market_override if market_override else None,
+    )
 
     # Add baseline comparison
     if baseline_pds is not None:
