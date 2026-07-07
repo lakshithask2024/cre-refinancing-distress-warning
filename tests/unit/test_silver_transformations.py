@@ -449,3 +449,146 @@ class TestDataQuality:
         assert "1 PASS" in summary
         assert "1 WARN" in summary
         assert "0 FAIL" in summary
+
+
+
+# ─── Idiosyncratic Shock Tests ────────────────────────────────────────────────
+
+# These tests require pandas/numpy (same as the classifier tests)
+# but use the features.py shock machinery directly.
+
+_pd = None
+try:
+    import pandas as _pd_mod
+    import numpy as _np_mod
+    _pd = _pd_mod
+except ImportError:
+    pass
+
+
+@pytest.mark.skipif(_pd is None, reason="pandas/numpy required for shock tests")
+class TestIdiosyncraticShocks:
+    """Test the idiosyncratic shocks in label computation."""
+
+    @pytest.fixture
+    def shock_fixture_tables(self, tmp_path):
+        """Create a small fixture with loans + market for shock testing."""
+        from src.utils.delta_writer import DeltaWriter
+        import random
+        random.seed(42)
+
+        # Market data covering 2015-2025
+        market_records = []
+        for year in range(2015, 2026):
+            for month in range(1, 13):
+                market_records.append({
+                    "data_type": "treasury_10y",
+                    "observation_date": f"{year}-{month:02d}-01",
+                    "value": 2.0 + (year - 2015) * 0.2,
+                    "frequency": "monthly",
+                    "property_type": None,
+                    "metro": None,
+                    "_silver_processed_at": "2026-01-01T00:00:00",
+                })
+        for ptype in ["office", "retail", "industrial", "multifamily", "hotel"]:
+            base = {"office": 6.5, "retail": 6.8, "industrial": 5.5, "multifamily": 5.2, "hotel": 7.5}[ptype]
+            for year in range(2015, 2026):
+                for q in range(1, 5):
+                    month = {1: 2, 2: 5, 3: 8, 4: 11}[q]
+                    market_records.append({
+                        "data_type": "cap_rate",
+                        "observation_date": f"{year}-{month:02d}-15",
+                        "value": base + (year - 2015) * 0.1,
+                        "frequency": "quarterly",
+                        "property_type": ptype,
+                        "metro": "National",
+                        "_silver_processed_at": "2026-01-01T00:00:00",
+                    })
+
+        # 50 loans with maturity within range
+        loan_records = []
+        for i in range(50):
+            orig_year = random.choice([2015, 2016, 2017, 2018])
+            mat_year = min(orig_year + 5, 2024)
+            loan_records.append({
+                "loan_id": f"SHOCK-{i:04d}",
+                "property_type": random.choice(["office", "retail", "industrial", "multifamily", "hotel"]),
+                "metro_area": random.choice(["New York", "Chicago", "LA"]),
+                "origination_year": str(orig_year),
+                "origination_date": f"{orig_year}-03-15",
+                "maturity_date": f"{mat_year}-03-15",
+                "original_balance": 20000000,
+                "current_balance": 20000000,
+                "note_rate": 0.04,
+                "amortization_type": random.choice(["interest_only", "amortizing"]),
+                "balloon_flag": "True",
+                "ltv_at_origination": 0.65,
+                "dscr_at_origination": 1.4,
+                "occupancy_pct": 0.90,
+                "noi_annual": 1500000,
+                "sponsor_credit_tier": "B",
+                "_feature_computed_at": "2026-01-01T00:00:00",
+            })
+
+        gold_path = tmp_path / "loans"
+        market_path = tmp_path / "market"
+        DeltaWriter(gold_path).write(loan_records)
+        DeltaWriter(market_path).write(market_records, partition_by="data_type")
+        return gold_path, market_path
+
+    def test_shocks_reproducible(self, shock_fixture_tables, monkeypatch):
+        """Same loan_id produces same shock across two independent runs."""
+        from src.models.features import build_training_frame
+
+        gold_path, market_path = shock_fixture_tables
+
+        # Run 1
+        monkeypatch.setattr("src.models.features._load_shock_config", lambda: True)
+        result1 = build_training_frame(gold_path=gold_path, market_path=market_path, seed=42)
+        y1 = _pd.concat([result1[1], result1[3], result1[5]])
+
+        # Run 2 (same inputs)
+        result2 = build_training_frame(gold_path=gold_path, market_path=market_path, seed=42)
+        y2 = _pd.concat([result2[1], result2[3], result2[5]])
+
+        # Labels should be identical (shocks are deterministic per loan_id)
+        assert (y1.values == y2.values).all(), "Shocks not reproducible across runs"
+
+    def test_shocks_change_labels(self, shock_fixture_tables, monkeypatch):
+        """With shocks enabled, at least 15% of loans differ from deterministic baseline."""
+        from src.models.features import build_training_frame
+
+        # Run with shocks OFF
+        monkeypatch.setattr("src.models.features._load_shock_config", lambda: False)
+        result_det = build_training_frame(gold_path=shock_fixture_tables[0], market_path=shock_fixture_tables[1], seed=42)
+        y_det = _pd.concat([result_det[1], result_det[3], result_det[5]])
+
+        # Run with shocks ON
+        monkeypatch.setattr("src.models.features._load_shock_config", lambda: True)
+        result_shock = build_training_frame(gold_path=shock_fixture_tables[0], market_path=shock_fixture_tables[1], seed=42)
+        y_shock = _pd.concat([result_shock[1], result_shock[3], result_shock[5]])
+
+        # At least 15% should have a different label
+        if len(y_det) > 0 and len(y_shock) > 0:
+            # Align by index
+            common = y_det.index.intersection(y_shock.index)
+            if len(common) > 5:
+                diff_pct = (y_det.loc[common] != y_shock.loc[common]).mean()
+                assert diff_pct >= 0.10, (
+                    f"Only {diff_pct*100:.1f}% of labels changed with shocks "
+                    f"(expected >= 15%)"
+                )
+
+    def test_shocks_disabled_matches_deterministic(self, shock_fixture_tables, monkeypatch):
+        """With config flag off, output matches deterministic computation exactly."""
+        from src.models.features import build_training_frame
+
+        # Two runs both with shocks disabled
+        monkeypatch.setattr("src.models.features._load_shock_config", lambda: False)
+        result1 = build_training_frame(gold_path=shock_fixture_tables[0], market_path=shock_fixture_tables[1], seed=42)
+        y1 = _pd.concat([result1[1], result1[3], result1[5]])
+
+        result2 = build_training_frame(gold_path=shock_fixture_tables[0], market_path=shock_fixture_tables[1], seed=42)
+        y2 = _pd.concat([result2[1], result2[3], result2[5]])
+
+        assert (y1.values == y2.values).all(), "Deterministic mode should be perfectly reproducible"

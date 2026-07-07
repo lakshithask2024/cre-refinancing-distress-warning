@@ -10,6 +10,11 @@ defaults:
   term_years: [5, 7, 10]
   random_seed: 42
 
+# Idiosyncratic shocks for label computation (breaks deterministic label-feature relationship)
+# When true, adds stochastic NOI volatility, occupancy shocks, and submarket cap rate shocks
+# to the maturity-date label computation. Features at T_obs remain deterministic.
+enable_idiosyncratic_shocks: true
+
 # Metro areas included in generation (CBSA-style)
 metros:
   - New York

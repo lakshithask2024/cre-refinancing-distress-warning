@@ -145,8 +145,13 @@ def build_training_frame(
     # ─── Snapshot features at T_obs ───────────────────────────────────────────
     loans_filtered = _compute_features_at_Tobs(loans_filtered, treasury_lookup, cap_rate_lookup)
 
+    # ─── Load shock config ──────────────────────────────────────────────────
+    enable_shocks = _load_shock_config()
+
     # ─── Compute label at maturity ────────────────────────────────────────────
-    loans_filtered = _compute_label_at_maturity(loans_filtered, treasury_lookup, cap_rate_lookup)
+    loans_filtered = _compute_label_at_maturity(
+        loans_filtered, treasury_lookup, cap_rate_lookup, enable_shocks=enable_shocks
+    )
 
     # ─── Time-based split ─────────────────────────────────────────────────────
     loans_filtered["origination_year"] = pd.to_numeric(
@@ -276,6 +281,41 @@ def _compute_features_at_Tobs(
     return df
 
 
+# ─── Deterministic per-loan RNG ───────────────────────────────────────────────
+
+
+def _load_shock_config() -> bool:
+    """
+    Load the enable_idiosyncratic_shocks flag from config/loan_generator.yaml.
+
+    Returns True by default if config cannot be read.
+    """
+    config_path = Path(__file__).resolve().parent.parent.parent / "config" / "loan_generator.yaml"
+    try:
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+        from src.utils.yaml_compat import load_yaml_file
+        config = load_yaml_file(str(config_path))
+        return bool(config.get("enable_idiosyncratic_shocks", True))
+    except Exception:
+        return True  # Default: shocks enabled
+
+
+def _loan_id_rng(loan_id: str) -> "random.Random":
+    """
+    Create a deterministic Random instance seeded from loan_id.
+
+    Why: Shocks must be reproducible — same loan_id always gets same shock.
+    Using hash(loan_id) as seed ensures this without requiring a global seed.
+    """
+    import hashlib
+    import random as _random
+
+    # Use MD5 hash for stable integer seed (not security-sensitive)
+    seed_int = int(hashlib.md5(loan_id.encode()).hexdigest()[:8], 16)
+    return _random.Random(seed_int)
+
+
 # ─── Label computation at maturity ───────────────────────────────────────────
 
 
@@ -283,18 +323,22 @@ def _compute_label_at_maturity(
     df: pd.DataFrame,
     treasury_lookup: dict[str, float],
     cap_rate_lookup: dict[tuple[str, str], float],
+    enable_shocks: bool = True,
 ) -> pd.DataFrame:
     """
-    Compute the refinancing distress label using market conditions AT maturity.
+    Compute the refinancing distress label using market conditions AT maturity,
+    with optional idiosyncratic shocks that make the prediction genuinely
+    probabilistic (prevents deterministic label-feature relationship).
 
     Label = 1 if loan would be in distress at maturity date:
       - maturity_dscr < 1.0 (can't cover debt service at maturity refi rate)
       OR
       - maturity_ltv > 0.70 (insufficient equity for refinancing)
 
-    Why 0.70 LTV threshold (not 0.80): At maturity, lenders require more equity
-    buffer for refinancing than for existing loan monitoring. 70% max LTV is the
-    typical threshold for new CMBS origination.
+    Shocks (applied ONLY to label, not features):
+      1. NOI volatility: property-specific random shock to maturity NOI
+      2. Occupancy shock: 10% of office/retail get tenant loss event
+      3. Submarket cap rate shock: 15% of loans get additional cap rate noise
     """
     # Market conditions at maturity
     df["treasury_10y_at_maturity"] = df["maturity_date_parsed"].apply(
@@ -311,13 +355,61 @@ def _compute_label_at_maturity(
         axis=1,
     )
 
-    # Maturity property value: NOI / cap_rate_at_maturity
-    noi = pd.to_numeric(df["noi_annual"], errors="coerce").fillna(0)
+    # Base NOI and balance
+    noi_base = pd.to_numeric(df["noi_annual"], errors="coerce").fillna(0).values.copy()
     balance = pd.to_numeric(df["current_balance"], errors="coerce").fillna(
         pd.to_numeric(df["original_balance"], errors="coerce").fillna(0)
-    )
-    cap_decimal_mat = df["cap_rate_at_maturity"] / 100.0
-    maturity_value = np.where(cap_decimal_mat > 0, noi / cap_decimal_mat, 0)
+    ).values
+    cap_rate_at_maturity = df["cap_rate_at_maturity"].values.copy()
+    property_types = df["property_type"].astype(str).values
+    loan_ids = df["loan_id"].astype(str).values
+
+    # ─── Apply idiosyncratic shocks ──────────────────────────────────────────
+    n_noi_shocks = 0
+    n_tenant_loss = 0
+    n_cap_shocks = 0
+    noi_shock_values = []
+
+    if enable_shocks:
+        for i in range(len(df)):
+            rng = _loan_id_rng(loan_ids[i])
+
+            # Shock 1: Property-specific NOI volatility
+            noi_volatility = rng.uniform(0.05, 0.25)  # 5-25% annual std
+            # 24-month horizon: std scales by sqrt(2)
+            shock = rng.gauss(0, noi_volatility * (2 ** 0.5))
+            shock = max(-0.40, min(0.40, shock))  # clip to [-40%, +40%]
+            noi_base[i] = noi_base[i] * (1.0 + shock)
+            noi_shock_values.append(shock)
+            if abs(shock) > 0.01:
+                n_noi_shocks += 1
+
+            # Shock 2: Occupancy/tenant loss (office and retail only)
+            ptype = property_types[i].lower()
+            if ptype in ("office", "retail"):
+                if rng.random() < 0.10:  # 10% probability
+                    tenant_loss = rng.uniform(0.10, 0.30)
+                    noi_base[i] = noi_base[i] * (1.0 - tenant_loss)
+                    n_tenant_loss += 1
+
+            # Shock 3: Submarket cap rate shock (15% of all loans)
+            if rng.random() < 0.15:
+                cap_shock = rng.gauss(0, 0.50)  # 50 bps std, in percentage points
+                cap_rate_at_maturity[i] = cap_rate_at_maturity[i] + cap_shock
+                n_cap_shocks += 1
+
+        logger.info(
+            f"  Applied idiosyncratic shocks: "
+            f"NOI (mean={np.mean(noi_shock_values):.4f}, std={np.std(noi_shock_values):.4f}), "
+            f"{n_tenant_loss} tenant-loss events, "
+            f"{n_cap_shocks} submarket cap rate shocks"
+        )
+    else:
+        logger.info("  Idiosyncratic shocks DISABLED (deterministic label computation)")
+
+    # ─── Compute maturity metrics with (possibly shocked) values ─────────────
+    cap_decimal_mat = cap_rate_at_maturity / 100.0
+    maturity_value = np.where(cap_decimal_mat > 0, noi_base / cap_decimal_mat, 0)
 
     # Maturity LTV
     maturity_ltv = np.where(maturity_value > 0, balance / maturity_value, 99.0)
@@ -328,9 +420,9 @@ def _compute_label_at_maturity(
     ds_mat = np.where(
         is_io,
         balance * refi_rate_mat,
-        _amort_annual_ds_vectorized(balance.values, refi_rate_mat),
+        _amort_annual_ds_vectorized(balance, refi_rate_mat),
     )
-    maturity_dscr = np.where(ds_mat > 0, noi.values / ds_mat, 0)
+    maturity_dscr = np.where(ds_mat > 0, noi_base / ds_mat, 0)
 
     # Label: distressed at maturity
     df[LABEL_COL] = ((maturity_dscr < 1.0) | (maturity_ltv > 0.70)).astype(int)
