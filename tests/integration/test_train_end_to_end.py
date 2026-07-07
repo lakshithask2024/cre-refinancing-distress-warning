@@ -31,6 +31,45 @@ pytest.importorskip("optuna", reason="optuna required for e2e training test")
 
 
 @pytest.fixture
+def e2e_market_table(tmp_path):
+    """Create market data for the e2e test."""
+    from src.utils.delta_writer import DeltaWriter
+    import random
+    random.seed(99)
+
+    records = []
+    for year in range(2015, 2026):
+        for month in range(1, 13):
+            records.append({
+                "data_type": "treasury_10y",
+                "observation_date": f"{year}-{month:02d}-01",
+                "value": 2.0 + (year - 2015) * 0.25,
+                "frequency": "monthly",
+                "property_type": None,
+                "metro": None,
+                "_silver_processed_at": "2026-01-01T00:00:00",
+            })
+    for ptype in ["office", "retail", "industrial", "multifamily", "hotel"]:
+        base = {"office": 6.0, "retail": 6.5, "industrial": 5.5, "multifamily": 5.0, "hotel": 7.5}[ptype]
+        for year in range(2015, 2026):
+            for q in range(1, 5):
+                month = {1: 2, 2: 5, 3: 8, 4: 11}[q]
+                records.append({
+                    "data_type": "cap_rate",
+                    "observation_date": f"{year}-{month:02d}-15",
+                    "value": base + (year - 2015) * 0.15,
+                    "frequency": "quarterly",
+                    "property_type": ptype,
+                    "metro": "National",
+                    "_silver_processed_at": "2026-01-01T00:00:00",
+                })
+
+    table_path = tmp_path / "market_rates"
+    DeltaWriter(table_path).write(records, partition_by="data_type")
+    return table_path
+
+
+@pytest.fixture
 def e2e_fixture_table(tmp_path):
     """Create a 500-row fixture Delta table for end-to-end training."""
     from src.utils.delta_writer import DeltaWriter
@@ -41,7 +80,9 @@ def e2e_fixture_table(tmp_path):
     prop_types = ["office", "retail", "industrial", "multifamily", "hotel"]
 
     for i in range(500):
-        orig_year = random.choice([2017, 2018, 2019, 2020, 2021, 2022])
+        orig_year = random.choice([2015, 2016, 2017, 2018, 2019, 2020])
+        term = random.choice([5, 7])
+        mat_year = min(orig_year + term, 2025)  # Keep within market range
         # Make distress correlated with features for AUC > 0.5
         ltv = random.uniform(0.4, 1.5)
         dscr = random.uniform(0.5, 2.0)
@@ -52,37 +93,29 @@ def e2e_fixture_table(tmp_path):
             "property_type": random.choice(prop_types),
             "metro_area": random.choice(metros),
             "origination_year": str(orig_year),
+            "origination_date": f"{orig_year}-06-15",
+            "maturity_date": f"{mat_year}-06-15",
             "original_balance": random.uniform(5e6, 50e6),
             "current_balance": random.uniform(5e6, 50e6),
             "note_rate": random.uniform(0.025, 0.07),
             "amortization_type": random.choice(["interest_only", "amortizing"]),
             "balloon_flag": random.choice(["True", "False"]),
-            "maturity_date": f"{orig_year + 7}-06-15",
             "ltv_at_origination": random.uniform(0.4, 0.85),
             "dscr_at_origination": random.uniform(0.8, 2.5),
             "occupancy_pct": random.uniform(0.5, 1.0),
-            "current_ltv": ltv,
-            "new_dscr": dscr,
-            "rate_gap": random.uniform(0.0, 0.03),
-            "rate_gap_bps": random.uniform(0, 300),
-            "debt_yield": random.uniform(0.05, 0.15),
-            "current_cap_rate": random.uniform(5.0, 9.0),
-            "refinance_rate": random.uniform(0.05, 0.08),
-            "months_to_maturity": random.uniform(-20, 80),
-            "sponsor_credit_tier": random.choice(["A", "B", "C"]),
-            "is_distressed": is_distressed,
             "noi_annual": random.uniform(500000, 5000000),
+            "sponsor_credit_tier": random.choice(["A", "B", "C"]),
             "_feature_computed_at": "2026-01-01T00:00:00",
         })
 
-    table_path = tmp_path / "loan_distress_history"
+    table_path = tmp_path / "loan_current_state"
     writer = DeltaWriter(table_path)
-    writer.write(records, partition_by="origination_year")
+    writer.write(records)
     return table_path
 
 
 @pytest.mark.slow
-def test_train_end_to_end(e2e_fixture_table, tmp_path, monkeypatch):
+def test_train_end_to_end(e2e_fixture_table, e2e_market_table, tmp_path, monkeypatch):
     """Full training run: 500 rows, 3 trials, verify outputs."""
     # Point MLflow and metrics output to temp directory
     mlruns_dir = tmp_path / "mlruns"
@@ -107,6 +140,7 @@ def test_train_end_to_end(e2e_fixture_table, tmp_path, monkeypatch):
         n_trials=3,
         seed=42,
         gold_path=str(e2e_fixture_table),
+        market_path=str(e2e_market_table),
     )
 
     # Assert run completed

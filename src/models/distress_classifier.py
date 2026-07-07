@@ -67,7 +67,8 @@ def train_and_log(
     experiment_name: str = "cre_distress",
     n_trials: int = 20,
     seed: int = 42,
-    gold_path: str | Path = "data/gold/loan_distress_history",
+    gold_path: str | Path = "data/gold/loan_current_state",
+    market_path: str | Path = "data/silver/market_rates",
 ) -> str:
     """
     Train XGBoost distress classifier with Optuna HPO and log to MLflow.
@@ -81,7 +82,8 @@ def train_and_log(
         experiment_name: MLflow experiment name
         n_trials: Number of Optuna optimization trials
         seed: Random seed for reproducibility across numpy, optuna, xgboost
-        gold_path: Path to Gold loan_distress_history Delta table
+        gold_path: Path to Gold loan_current_state Delta table
+        market_path: Path to Silver market_rates Delta table
 
     Returns:
         MLflow parent run_id (str)
@@ -102,7 +104,7 @@ def train_and_log(
     # ─── Step 1: Load and prepare data ────────────────────────────────────────
     logger.info("\n[1/5] Building training frame...")
     X_train, y_train, X_valid, y_valid, X_test, y_test, feature_names = (
-        build_training_frame(gold_path=gold_path, seed=seed)
+        build_training_frame(gold_path=gold_path, market_path=market_path, seed=seed)
     )
 
     # Class imbalance handling

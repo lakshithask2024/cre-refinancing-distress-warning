@@ -1,24 +1,34 @@
 """
-Feature Engineering for Distress Classifier
-=============================================
+Feature Engineering for Distress Classifier — Forward-Looking Prediction
+==========================================================================
 
-Reads the Gold loan_distress_history table, engineers model-ready features,
-applies target encoding for high-cardinality categoricals, constructs the
-binary classification label, and produces time-based train/valid/test splits.
+TASK FRAMING (leakage-free):
+  Predict whether a loan will be in refinancing distress AT MATURITY, using
+  only information observable 24 months BEFORE maturity (T_obs).
 
-The time-based split prevents data leakage:
-  - Train: origination_year <= 2019  (pre-pandemic vintages)
-  - Valid: origination_year == 2020  (pandemic pivot year)
-  - Test:  origination_year >= 2021  (post-pandemic stress environment)
+  - T_obs = maturity_date - 24 months (the "early warning" observation point)
+  - Features = loan attributes + market conditions snapshotted AT T_obs
+  - Label = refinancing viability computed AT maturity_date using maturity-date
+    market conditions
 
-This means the model is trained on "normal" conditions and evaluated on how
-well it generalizes to the stressed environment we actually care about.
+  This ensures NO future information leaks into features:
+    Features use market data from T_obs (the past relative to maturity).
+    Label uses market data from maturity_date (the future relative to T_obs).
+
+FILTER:
+  Only loans where BOTH T_obs and maturity_date fall within the available
+  market data date range are included (no extrapolation).
+
+SPLIT:
+  Train: origination_year <= 2018
+  Valid: origination_year == 2019
+  Test:  origination_year >= 2020
 """
 
 from __future__ import annotations
 
 import logging
-import math
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -27,19 +37,22 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Feature column groups
-NUMERIC_FEATURES = [
+# ─── Feature column definitions ──────────────────────────────────────────────
+
+# Features observed at T_obs (24mo before maturity)
+NUMERIC_FEATURES_AT_TOBS = [
     "ltv_at_origination",
     "dscr_at_origination",
     "note_rate",
     "log_original_balance",
-    "current_ltv",
-    "new_dscr",
-    "rate_gap_bps",
-    "months_to_maturity",
     "occupancy_pct",
-    "current_cap_rate",
-    "debt_yield",
+    "months_since_origination_at_Tobs",
+    "treasury_10y_at_Tobs",
+    "cap_rate_at_Tobs",
+    "rate_gap_bps_at_Tobs",
+    "cap_rate_delta_since_origination_at_Tobs",
+    "current_ltv_at_Tobs",
+    "current_dscr_at_Tobs",
 ]
 
 ONEHOT_FEATURES = [
@@ -49,15 +62,28 @@ ONEHOT_FEATURES = [
     "balloon_flag",
 ]
 
-TARGET_ENCODED_FEATURES = [
-    "metro_area",
-]
+TARGET_ENCODED_FEATURES = ["metro_area"]
 
-LABEL_COL = "is_distressed"
+LABEL_COL = "distress_at_maturity"
+
+# Refinance spread over Treasury 10Y by property type (bps)
+REFI_SPREAD_BPS: dict[str, float] = {
+    "office": 250,
+    "retail": 275,
+    "industrial": 200,
+    "multifamily": 180,
+    "hotel": 325,
+}
+
+
+class FeatureLeakageError(Exception):
+    """Raised when a sanity check detects potential label leakage."""
+    pass
 
 
 def build_training_frame(
-    gold_path: str | Path = "data/gold/loan_distress_history",
+    gold_path: str | Path = "data/gold/loan_current_state",
+    market_path: str | Path = "data/silver/market_rates",
     seed: int = 42,
 ) -> tuple[
     pd.DataFrame,
@@ -69,131 +95,360 @@ def build_training_frame(
     list[str],
 ]:
     """
-    Build model-ready training data from Gold loan_distress_history.
+    Build leakage-free training data for distress prediction at maturity.
 
-    Why this function exists:
-      Centralizes all feature engineering so the model training code receives
-      clean numeric matrices with no NaN, no leakage, and consistent encoding.
+    The key insight: features are snapshotted 24 months before maturity (T_obs),
+    while the label is determined by market conditions AT maturity. This creates
+    a genuine prediction problem — can we identify distress risk 2 years early?
 
     Returns:
         (X_train, y_train, X_valid, y_valid, X_test, y_test, feature_names)
     """
     np.random.seed(seed)
 
-    # Load data
-    df = _load_gold_data(gold_path)
-    logger.info(f"Loaded {len(df)} records from {gold_path}")
+    # ─── Load data ────────────────────────────────────────────────────────────
+    loans_df = _load_delta_as_df(gold_path)
+    market_df = _load_delta_as_df(market_path)
 
-    # Engineer features
-    df = _engineer_numeric_features(df)
+    logger.info(f"Loaded {len(loans_df)} loans, {len(market_df)} market records")
 
-    # Time-based split (before encoding to prevent leakage)
-    train_mask = df["origination_year"].astype(int) <= 2019
-    valid_mask = df["origination_year"].astype(int) == 2020
-    test_mask = df["origination_year"].astype(int) >= 2021
+    # ─── Build market lookup tables ───────────────────────────────────────────
+    treasury_lookup = _build_treasury_lookup(market_df)
+    cap_rate_lookup = _build_cap_rate_lookup(market_df)
 
-    df_train = df[train_mask].copy()
-    df_valid = df[valid_mask].copy()
-    df_test = df[test_mask].copy()
+    market_start, market_end = _get_market_date_range(treasury_lookup)
+    logger.info(f"Market data range: {market_start} to {market_end}")
+
+    # ─── Compute T_obs and filter loans ───────────────────────────────────────
+    loans_df["maturity_date_parsed"] = pd.to_datetime(loans_df["maturity_date"], errors="coerce")
+    loans_df["origination_date_parsed"] = pd.to_datetime(loans_df["origination_date"], errors="coerce")
+    loans_df["T_obs"] = loans_df["maturity_date_parsed"] - pd.Timedelta(days=730)  # ~24 months
+
+    # Filter: both T_obs and maturity must be within market data range
+    mask_tobs = loans_df["T_obs"] >= pd.Timestamp(market_start)
+    mask_maturity = loans_df["maturity_date_parsed"] <= pd.Timestamp(market_end)
+    mask_valid_dates = loans_df["maturity_date_parsed"].notna() & loans_df["T_obs"].notna()
+
+    loans_filtered = loans_df[mask_tobs & mask_maturity & mask_valid_dates].copy()
+    n_dropped = len(loans_df) - len(loans_filtered)
+    logger.info(
+        f"Filter: {len(loans_filtered)} loans pass (dropped {n_dropped} "
+        f"where T_obs or maturity outside market range)"
+    )
+
+    if len(loans_filtered) == 0:
+        raise ValueError(
+            "No loans pass the date filter. Check that maturity dates fall "
+            "within market data range and T_obs (maturity - 24mo) is after market start."
+        )
+
+    # ─── Snapshot features at T_obs ───────────────────────────────────────────
+    loans_filtered = _compute_features_at_Tobs(loans_filtered, treasury_lookup, cap_rate_lookup)
+
+    # ─── Compute label at maturity ────────────────────────────────────────────
+    loans_filtered = _compute_label_at_maturity(loans_filtered, treasury_lookup, cap_rate_lookup)
+
+    # ─── Time-based split ─────────────────────────────────────────────────────
+    loans_filtered["origination_year"] = pd.to_numeric(
+        loans_filtered["origination_year"], errors="coerce"
+    )
+    train_mask = loans_filtered["origination_year"] <= 2018
+    valid_mask = loans_filtered["origination_year"] == 2019
+    test_mask = loans_filtered["origination_year"] >= 2020
+
+    df_train = loans_filtered[train_mask].copy()
+    df_valid = loans_filtered[valid_mask].copy()
+    df_test = loans_filtered[test_mask].copy()
+
+    # Warn if any split is empty
+    for name, split_df in [("train", df_train), ("valid", df_valid), ("test", df_test)]:
+        if len(split_df) == 0:
+            logger.warning(f"WARNING: {name} split is empty! Check origination_year distribution.")
 
     logger.info(
         f"Split sizes — train: {len(df_train)}, valid: {len(df_valid)}, test: {len(df_test)}"
     )
 
-    # Target encoding for metro_area (computed ONLY on training set)
-    metro_means = df_train.groupby("metro_area")[LABEL_COL].mean()
-    global_mean = df_train[LABEL_COL].mean()
+    # ─── Target encoding for metro (train-only) ──────────────────────────────
+    if len(df_train) > 0:
+        metro_means = df_train.groupby("metro_area")[LABEL_COL].mean()
+        global_mean = df_train[LABEL_COL].mean()
+    else:
+        metro_means = pd.Series(dtype=float)
+        global_mean = 0.5
 
     df_train["metro_encoded"] = df_train["metro_area"].map(metro_means).fillna(global_mean)
     df_valid["metro_encoded"] = df_valid["metro_area"].map(metro_means).fillna(global_mean)
     df_test["metro_encoded"] = df_test["metro_area"].map(metro_means).fillna(global_mean)
 
-    # One-hot encoding (fit on full vocabulary to avoid missing dummies)
+    # ─── One-hot encoding ─────────────────────────────────────────────────────
     df_train, df_valid, df_test, onehot_cols = _apply_onehot(df_train, df_valid, df_test)
 
-    # Assemble final feature matrices
-    feature_cols = NUMERIC_FEATURES + ["metro_encoded"] + onehot_cols
+    # ─── Assemble feature matrices ────────────────────────────────────────────
+    feature_cols = NUMERIC_FEATURES_AT_TOBS + ["metro_encoded"] + onehot_cols
     feature_cols = [c for c in feature_cols if c in df_train.columns]
 
-    X_train = df_train[feature_cols].copy()
-    X_valid = df_valid[feature_cols].copy()
-    X_test = df_test[feature_cols].copy()
+    X_train = df_train[feature_cols].astype(float).fillna(0.0)
+    X_valid = df_valid[feature_cols].astype(float).fillna(0.0)
+    X_test = df_test[feature_cols].astype(float).fillna(0.0)
 
     y_train = df_train[LABEL_COL].astype(int)
     y_valid = df_valid[LABEL_COL].astype(int)
     y_test = df_test[LABEL_COL].astype(int)
 
-    # Fill any remaining NaN with 0 (should be rare after engineering)
-    X_train = X_train.fillna(0.0)
-    X_valid = X_valid.fillna(0.0)
-    X_test = X_test.fillna(0.0)
-
-    logger.info(f"Feature matrix shape: {X_train.shape[1]} features")
-    logger.info(
-        f"Label distribution — train: {y_train.mean():.3f}, "
-        f"valid: {y_valid.mean():.3f}, test: {y_test.mean():.3f}"
-    )
+    # ─── Sanity checks ────────────────────────────────────────────────────────
+    _run_sanity_checks(X_train, y_train, X_valid, y_valid, X_test, y_test, feature_cols)
 
     return X_train, y_train, X_valid, y_valid, X_test, y_test, feature_cols
 
 
-def _load_gold_data(gold_path: str | Path) -> pd.DataFrame:
+# ─── Feature computation at T_obs ────────────────────────────────────────────
+
+
+def _compute_features_at_Tobs(
+    df: pd.DataFrame,
+    treasury_lookup: dict[str, float],
+    cap_rate_lookup: dict[tuple[str, str], float],
+) -> pd.DataFrame:
     """
-    Load loan_distress_history from Delta/Parquet/JSON-lines.
+    Snapshot market-derived features at T_obs (24 months before maturity).
 
-    Why: Abstracts the storage format so features.py works regardless of
-    whether Bronze was written by Spark (Parquet) or pure-Python (JSON-lines).
+    Why T_obs features, not current: Using current market values would leak
+    information about future market movements into the feature set. The model
+    should only see what was knowable at the early-warning observation point.
     """
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-    from src.utils.delta_writer import DeltaReader
+    # Static loan features (don't change with time)
+    df["log_original_balance"] = np.log1p(
+        pd.to_numeric(df["original_balance"], errors="coerce").fillna(0)
+    )
+    df["note_rate"] = pd.to_numeric(df["note_rate"], errors="coerce").fillna(0)
+    df["ltv_at_origination"] = pd.to_numeric(df["ltv_at_origination"], errors="coerce").fillna(0)
+    df["dscr_at_origination"] = pd.to_numeric(df["dscr_at_origination"], errors="coerce").fillna(0)
+    df["occupancy_pct"] = pd.to_numeric(df["occupancy_pct"], errors="coerce").fillna(0)
 
-    reader = DeltaReader(gold_path)
-    records = reader.read()
-    df = pd.DataFrame(records)
+    # Time-varying features snapshotted at T_obs
+    df["months_since_origination_at_Tobs"] = (
+        (df["T_obs"] - df["origination_date_parsed"]).dt.days / 30.44
+    ).fillna(0)
 
-    # Ensure numeric columns are actually numeric
-    numeric_cols = [
-        "original_balance", "current_balance", "note_rate", "occupancy_pct",
-        "noi_annual", "current_ltv", "new_dscr", "rate_gap", "rate_gap_bps",
-        "debt_yield", "current_cap_rate", "refinance_rate", "months_to_maturity",
-        "ltv_at_origination", "dscr_at_origination",
+    # Market lookups at T_obs
+    df["treasury_10y_at_Tobs"] = df["T_obs"].apply(
+        lambda d: _lookup_treasury(d, treasury_lookup)
+    )
+    df["cap_rate_at_Tobs"] = df.apply(
+        lambda row: _lookup_cap_rate(row["T_obs"], row.get("property_type", "office"), cap_rate_lookup),
+        axis=1,
+    )
+
+    # Rate gap at T_obs: projected refi rate at T_obs minus original note rate
+    df["refi_rate_at_Tobs"] = df.apply(
+        lambda row: (row["treasury_10y_at_Tobs"] + REFI_SPREAD_BPS.get(str(row.get("property_type", "office")), 250) / 100.0) / 100.0,
+        axis=1,
+    )
+    df["rate_gap_bps_at_Tobs"] = (df["refi_rate_at_Tobs"] - df["note_rate"]) * 10000
+
+    # Cap rate delta since origination (as of T_obs)
+    df["cap_rate_at_origination"] = df.apply(
+        lambda row: _lookup_cap_rate(row["origination_date_parsed"], row.get("property_type", "office"), cap_rate_lookup),
+        axis=1,
+    )
+    df["cap_rate_delta_since_origination_at_Tobs"] = df["cap_rate_at_Tobs"] - df["cap_rate_at_origination"]
+
+    # Current LTV at T_obs: balance / (NOI / cap_rate_at_Tobs)
+    noi = pd.to_numeric(df["noi_annual"], errors="coerce").fillna(0)
+    balance = pd.to_numeric(df["current_balance"], errors="coerce").fillna(
+        pd.to_numeric(df["original_balance"], errors="coerce").fillna(0)
+    )
+    cap_decimal = df["cap_rate_at_Tobs"] / 100.0
+    value_at_Tobs = np.where(cap_decimal > 0, noi / cap_decimal, 0)
+    df["current_ltv_at_Tobs"] = np.where(value_at_Tobs > 0, balance / value_at_Tobs, 0)
+
+    # Current DSCR at T_obs: NOI / debt_service at refi_rate_at_Tobs
+    refi_rate = df["refi_rate_at_Tobs"].values
+    is_io = (df["amortization_type"].astype(str) == "interest_only").values
+    ds = np.where(
+        is_io,
+        balance * refi_rate,
+        _amort_annual_ds_vectorized(balance.values, refi_rate),
+    )
+    df["current_dscr_at_Tobs"] = np.where(ds > 0, noi.values / ds, 0)
+
+    return df
+
+
+# ─── Label computation at maturity ───────────────────────────────────────────
+
+
+def _compute_label_at_maturity(
+    df: pd.DataFrame,
+    treasury_lookup: dict[str, float],
+    cap_rate_lookup: dict[tuple[str, str], float],
+) -> pd.DataFrame:
+    """
+    Compute the refinancing distress label using market conditions AT maturity.
+
+    Label = 1 if loan would be in distress at maturity date:
+      - maturity_dscr < 1.0 (can't cover debt service at maturity refi rate)
+      OR
+      - maturity_ltv > 0.70 (insufficient equity for refinancing)
+
+    Why 0.70 LTV threshold (not 0.80): At maturity, lenders require more equity
+    buffer for refinancing than for existing loan monitoring. 70% max LTV is the
+    typical threshold for new CMBS origination.
+    """
+    # Market conditions at maturity
+    df["treasury_10y_at_maturity"] = df["maturity_date_parsed"].apply(
+        lambda d: _lookup_treasury(d, treasury_lookup)
+    )
+    df["cap_rate_at_maturity"] = df.apply(
+        lambda row: _lookup_cap_rate(row["maturity_date_parsed"], row.get("property_type", "office"), cap_rate_lookup),
+        axis=1,
+    )
+
+    # Maturity refi rate
+    df["maturity_refi_rate"] = df.apply(
+        lambda row: (row["treasury_10y_at_maturity"] + REFI_SPREAD_BPS.get(str(row.get("property_type", "office")), 250) / 100.0) / 100.0,
+        axis=1,
+    )
+
+    # Maturity property value: NOI / cap_rate_at_maturity
+    noi = pd.to_numeric(df["noi_annual"], errors="coerce").fillna(0)
+    balance = pd.to_numeric(df["current_balance"], errors="coerce").fillna(
+        pd.to_numeric(df["original_balance"], errors="coerce").fillna(0)
+    )
+    cap_decimal_mat = df["cap_rate_at_maturity"] / 100.0
+    maturity_value = np.where(cap_decimal_mat > 0, noi / cap_decimal_mat, 0)
+
+    # Maturity LTV
+    maturity_ltv = np.where(maturity_value > 0, balance / maturity_value, 99.0)
+
+    # Maturity DSCR
+    refi_rate_mat = df["maturity_refi_rate"].values
+    is_io = (df["amortization_type"].astype(str) == "interest_only").values
+    ds_mat = np.where(
+        is_io,
+        balance * refi_rate_mat,
+        _amort_annual_ds_vectorized(balance.values, refi_rate_mat),
+    )
+    maturity_dscr = np.where(ds_mat > 0, noi.values / ds_mat, 0)
+
+    # Label: distressed at maturity
+    df[LABEL_COL] = ((maturity_dscr < 1.0) | (maturity_ltv > 0.70)).astype(int)
+
+    # Drop the maturity-time columns (prevent leakage into features)
+    df.drop(columns=[
+        "treasury_10y_at_maturity", "cap_rate_at_maturity",
+        "maturity_refi_rate",
+    ], inplace=True, errors="ignore")
+
+    return df
+
+
+# ─── Market data lookup helpers ───────────────────────────────────────────────
+
+
+def _build_treasury_lookup(market_df: pd.DataFrame) -> dict[str, float]:
+    """Build date-string → rate lookup for Treasury 10Y."""
+    t10 = market_df[market_df["data_type"] == "treasury_10y"]
+    lookup: dict[str, float] = {}
+    for _, row in t10.iterrows():
+        obs = str(row["observation_date"])
+        val = row.get("value")
+        if val is not None:
+            lookup[obs] = float(val)
+    return lookup
+
+
+def _build_cap_rate_lookup(market_df: pd.DataFrame) -> dict[tuple[str, str], float]:
+    """Build (date, property_type) → cap_rate lookup (national only)."""
+    caps = market_df[
+        (market_df["data_type"] == "cap_rate") &
+        (market_df["metro"].isin(["National", None, ""]) | market_df["metro"].isna())
     ]
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # Ensure label is numeric
-    if "is_distressed" in df.columns:
-        df["is_distressed"] = df["is_distressed"].map(
-            {True: 1, False: 0, "True": 1, "False": 0, "1": 1, "0": 0, 1: 1, 0: 0}
-        ).fillna(0).astype(int)
-
-    # Ensure origination_year is numeric
-    if "origination_year" in df.columns:
-        df["origination_year"] = pd.to_numeric(df["origination_year"], errors="coerce")
-
-    return df
+    lookup: dict[tuple[str, str], float] = {}
+    for _, row in caps.iterrows():
+        obs = str(row["observation_date"])
+        ptype = str(row.get("property_type", "")).lower()
+        val = row.get("value")
+        if val is not None and ptype:
+            lookup[(obs, ptype)] = float(val)
+    return lookup
 
 
-def _engineer_numeric_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Compute derived numeric features.
+def _get_market_date_range(treasury_lookup: dict[str, float]) -> tuple[str, str]:
+    """Get the earliest and latest dates in the treasury lookup."""
+    if not treasury_lookup:
+        return "2015-01-01", "2025-12-31"
+    dates = sorted(treasury_lookup.keys())
+    return dates[0], dates[-1]
 
-    Why each feature matters for distress prediction:
-      - log_original_balance: larger loans have different risk profiles (nonlinear)
-      - rate_gap_bps: direct measure of refinancing cost increase
-      - months_to_maturity: urgency — near-term maturities are more actionable
-    """
-    # Log-transform balance (reduces skewness of lognormal distribution)
-    df["log_original_balance"] = np.log1p(df["original_balance"].fillna(0).astype(float))
 
-    # Ensure key features exist with defaults
-    for col in NUMERIC_FEATURES:
-        if col not in df.columns:
-            df[col] = 0.0
+def _lookup_treasury(dt: Any, lookup: dict[str, float]) -> float:
+    """Look up Treasury 10Y rate for a given date (nearest available)."""
+    if pd.isna(dt):
+        return 4.0  # fallback
+    target = pd.Timestamp(dt)
+    target_str = target.strftime("%Y-%m-01")
+    if target_str in lookup:
+        return lookup[target_str]
+    # Find nearest date
+    dates = sorted(lookup.keys())
+    for d in reversed(dates):
+        if d <= target_str:
+            return lookup[d]
+    # If all dates are after target, use earliest
+    return lookup[dates[0]] if dates else 4.0
 
-    return df
+
+def _lookup_cap_rate(dt: Any, property_type: str, lookup: dict[tuple[str, str], float]) -> float:
+    """Look up cap rate for (date, property_type), matching nearest quarter."""
+    if pd.isna(dt):
+        return 6.5  # fallback
+    target = pd.Timestamp(dt)
+    ptype = str(property_type).lower()
+
+    # Convert to quarter label
+    quarter = (target.month - 1) // 3 + 1
+    quarter_str = f"{target.year}-{target.month:02d}-15"  # normalized quarter date
+
+    # Try exact quarter key format used in silver (YYYY-MM-15)
+    key = (quarter_str, ptype)
+    if key in lookup:
+        return lookup[key]
+
+    # Try YYYY-Qn format
+    q_label = f"{target.year}-Q{quarter}"
+    # Search through keys for matching quarter
+    for (d, pt), val in lookup.items():
+        if pt == ptype and q_label in d:
+            return val
+
+    # Fallback: find nearest date for this property type
+    type_entries = [(d, v) for (d, pt), v in lookup.items() if pt == ptype]
+    if type_entries:
+        type_entries.sort(key=lambda x: x[0])
+        target_approx = target.strftime("%Y-%m")
+        for d, v in reversed(type_entries):
+            if d[:7] <= target_approx:
+                return v
+        return type_entries[0][1]
+
+    return 6.5  # absolute fallback
+
+
+def _amort_annual_ds_vectorized(balance: np.ndarray, rate: np.ndarray) -> np.ndarray:
+    """Compute annual debt service for amortizing loans (30yr schedule), vectorized."""
+    monthly_rate = rate / 12.0
+    # Avoid division by zero
+    safe_mr = np.where(monthly_rate > 0, monthly_rate, 1e-10)
+    pmt_factor = (safe_mr * (1 + safe_mr) ** 360) / ((1 + safe_mr) ** 360 - 1)
+    annual_ds = balance * pmt_factor * 12
+    # Zero out where rate was zero
+    annual_ds = np.where(monthly_rate > 0, annual_ds, balance / 30.0)
+    return annual_ds
+
+
+# ─── One-hot encoding ─────────────────────────────────────────────────────────
 
 
 def _apply_onehot(
@@ -201,18 +456,11 @@ def _apply_onehot(
     valid: pd.DataFrame,
     test: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str]]:
-    """
-    Apply one-hot encoding consistently across splits.
-
-    Why: We fit the vocabulary on ALL data (not just train) to avoid
-    KeyError when valid/test have categories not seen in train.
-    The model still only learns weights from train labels.
-    """
+    """Apply one-hot encoding consistently across all splits."""
     all_categories: dict[str, list[str]] = {}
 
     for col in ONEHOT_FEATURES:
         if col in train.columns:
-            # Collect all unique values across splits
             all_vals = set()
             for split_df in [train, valid, test]:
                 if col in split_df.columns:
@@ -220,7 +468,6 @@ def _apply_onehot(
             all_categories[col] = sorted(str(v) for v in all_vals)
 
     onehot_cols: list[str] = []
-
     for col, categories in all_categories.items():
         for cat in categories:
             new_col = f"{col}_{cat}"
@@ -230,3 +477,73 @@ def _apply_onehot(
             test[new_col] = (test[col].astype(str) == cat).astype(int)
 
     return train, valid, test, onehot_cols
+
+
+# ─── Data loading ─────────────────────────────────────────────────────────────
+
+
+def _load_delta_as_df(path: str | Path) -> pd.DataFrame:
+    """Load a Delta/Parquet/JSON table into a pandas DataFrame."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+    from src.utils.delta_writer import DeltaReader
+
+    reader = DeltaReader(path)
+    records = reader.read()
+    return pd.DataFrame(records)
+
+
+# ─── Sanity checks ────────────────────────────────────────────────────────────
+
+
+def _run_sanity_checks(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_valid: pd.DataFrame,
+    y_valid: pd.Series,
+    X_test: pd.DataFrame,
+    y_test: pd.Series,
+    feature_cols: list[str],
+) -> None:
+    """
+    Post-build sanity checks to catch residual leakage or data issues.
+
+    Raises FeatureLeakageError if any check fails critically.
+    """
+    # Check 1: No split is empty
+    for name, X, y in [("train", X_train, y_train), ("valid", X_valid, y_valid), ("test", X_test, y_test)]:
+        if len(X) == 0:
+            logger.warning(f"Sanity check: {name} split is EMPTY")
+
+    # Check 2: Label distribution is not degenerate (0% or 100%)
+    for name, y in [("train", y_train), ("valid", y_valid), ("test", y_test)]:
+        if len(y) > 0:
+            mean = y.mean()
+            if mean == 0.0 or mean == 1.0:
+                logger.warning(
+                    f"Sanity check: {name} label is degenerate "
+                    f"(mean={mean:.3f}). Model cannot learn."
+                )
+
+    # Check 3: Top feature correlations with label (catch leakage)
+    if len(X_train) > 10 and y_train.nunique() > 1:
+        correlations = X_train.corrwith(y_train).abs().sort_values(ascending=False)
+        top5 = correlations.head(5)
+        logger.info("Top 5 feature correlations with label:")
+        for feat, corr in top5.items():
+            logger.info(f"  {feat}: {corr:.4f}")
+            if corr > 0.90:
+                raise FeatureLeakageError(
+                    f"LEAKAGE DETECTED: feature '{feat}' has correlation {corr:.4f} "
+                    f"with label. This suggests the feature contains future information."
+                )
+
+    # Check 4: No feature names suggest maturity-time or current-state leakage
+    forbidden_patterns = ["at_maturity", "maturity_refi", "maturity_dscr", "maturity_ltv"]
+    for col in feature_cols:
+        for pattern in forbidden_patterns:
+            if pattern in col:
+                raise FeatureLeakageError(
+                    f"LEAKAGE DETECTED: feature '{col}' contains forbidden pattern "
+                    f"'{pattern}'. Maturity-time values must not be in feature matrix."
+                )

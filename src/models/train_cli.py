@@ -53,8 +53,14 @@ Examples:
     parser.add_argument(
         "--gold-path",
         type=str,
-        default="data/gold/loan_distress_history",
-        help="Path to Gold loan_distress_history table",
+        default="data/gold/loan_current_state",
+        help="Path to Gold loan_current_state table",
+    )
+    parser.add_argument(
+        "--market-path",
+        type=str,
+        default="data/silver/market_rates",
+        help="Path to Silver market_rates table",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -95,6 +101,7 @@ def main() -> None:
         n_trials=args.n_trials,
         seed=args.seed,
         gold_path=args.gold_path,
+        market_path=args.market_path,
     )
 
     print(f"\n{'='*60}")
