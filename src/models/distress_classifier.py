@@ -136,14 +136,14 @@ def train_and_log(
         # Define Optuna objective
         def objective(trial: optuna.Trial) -> float:
             params = {
-                "max_depth": trial.suggest_int("max_depth", 3, 10),
+                "max_depth": trial.suggest_int("max_depth", 3, 6),
                 "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
                 "n_estimators": trial.suggest_int("n_estimators", 100, 500),
-                "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
+                "min_child_weight": trial.suggest_int("min_child_weight", 5, 30),
                 "subsample": trial.suggest_float("subsample", 0.6, 1.0),
                 "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
-                "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 1.0, log=True),
-                "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 1.0, log=True),
+                "reg_alpha": trial.suggest_float("reg_alpha", 0.01, 5.0, log=True),
+                "reg_lambda": trial.suggest_float("reg_lambda", 0.01, 5.0, log=True),
             }
 
             model = xgb.XGBClassifier(

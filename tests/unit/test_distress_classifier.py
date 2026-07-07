@@ -398,18 +398,23 @@ class TestOptunaSearchSpace:
         """Sample from search space and verify all bounds are respected."""
         def dummy_objective(trial):
             params = {
-                "max_depth": trial.suggest_int("max_depth", 3, 10),
+                "max_depth": trial.suggest_int("max_depth", 3, 6),
                 "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
                 "n_estimators": trial.suggest_int("n_estimators", 100, 500),
-                "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
+                "min_child_weight": trial.suggest_int("min_child_weight", 5, 30),
                 "subsample": trial.suggest_float("subsample", 0.6, 1.0),
                 "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
-                "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 1.0, log=True),
-                "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 1.0, log=True),
+                "reg_alpha": trial.suggest_float("reg_alpha", 0.01, 5.0, log=True),
+                "reg_lambda": trial.suggest_float("reg_lambda", 0.01, 5.0, log=True),
             }
-            assert 3 <= params["max_depth"] <= 10
+            assert 3 <= params["max_depth"] <= 6
             assert 0.01 <= params["learning_rate"] <= 0.3
             assert 100 <= params["n_estimators"] <= 500
+            assert 5 <= params["min_child_weight"] <= 30
+            assert 0.6 <= params["subsample"] <= 1.0
+            assert 0.6 <= params["colsample_bytree"] <= 1.0
+            assert 0.01 <= params["reg_alpha"] <= 5.0
+            assert 0.01 <= params["reg_lambda"] <= 5.0
             return 0.5
 
         study = optuna.create_study(direction="maximize")

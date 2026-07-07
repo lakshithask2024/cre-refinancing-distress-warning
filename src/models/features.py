@@ -371,40 +371,74 @@ def _compute_label_at_maturity(
     noi_shock_values = []
 
     if enable_shocks:
+        n_surprise_defaults = 0
+
         for i in range(len(df)):
             rng = _loan_id_rng(loan_ids[i])
 
-            # Shock 1: Property-specific NOI volatility
-            noi_volatility = rng.uniform(0.05, 0.25)  # 5-25% annual std
+            # Shock 1: Property-specific NOI volatility (WIDENED)
+            noi_volatility = rng.uniform(0.10, 0.40)  # 10-40% annual std
             # 24-month horizon: std scales by sqrt(2)
             shock = rng.gauss(0, noi_volatility * (2 ** 0.5))
-            shock = max(-0.40, min(0.40, shock))  # clip to [-40%, +40%]
+            shock = max(-0.60, min(0.60, shock))  # clip to [-60%, +60%]
             noi_base[i] = noi_base[i] * (1.0 + shock)
             noi_shock_values.append(shock)
             if abs(shock) > 0.01:
                 n_noi_shocks += 1
 
-            # Shock 2: Occupancy/tenant loss (office and retail only)
+            # Shock 2: Occupancy/tenant loss (office, retail, hotel)
             ptype = property_types[i].lower()
             if ptype in ("office", "retail"):
-                if rng.random() < 0.10:  # 10% probability
-                    tenant_loss = rng.uniform(0.10, 0.30)
+                if rng.random() < 0.25:  # 25% probability
+                    tenant_loss = rng.uniform(0.15, 0.50)
+                    noi_base[i] = noi_base[i] * (1.0 - tenant_loss)
+                    n_tenant_loss += 1
+            elif ptype == "hotel":
+                if rng.random() < 0.10:  # 10% probability for hotel
+                    tenant_loss = rng.uniform(0.15, 0.50)
                     noi_base[i] = noi_base[i] * (1.0 - tenant_loss)
                     n_tenant_loss += 1
 
-            # Shock 3: Submarket cap rate shock (15% of all loans)
-            if rng.random() < 0.15:
-                cap_shock = rng.gauss(0, 0.50)  # 50 bps std, in percentage points
+            # Shock 3: Submarket cap rate shock (30% of all loans, 100bps std)
+            if rng.random() < 0.30:
+                cap_shock = rng.gauss(0, 1.00)  # 100 bps std, in percentage points
                 cap_rate_at_maturity[i] = cap_rate_at_maturity[i] + cap_shock
                 n_cap_shocks += 1
+
+            # Shock 4: Surprise default (5% — unobservable factors)
+            if rng.random() < 0.05:
+                n_surprise_defaults += 1
+                # Will force label=1 after metric computation (below)
+
+        # Record which loans are surprise defaults (re-derive from same RNG)
+        surprise_default_indices: list[int] = []
+        for i in range(len(df)):
+            rng2 = _loan_id_rng(loan_ids[i])
+            # Consume draws in same order as above to reach Shock 4 draw
+            rng2.uniform(0.10, 0.40)   # NOI volatility
+            rng2.gauss(0, 1.0)         # NOI shock
+            ptype = property_types[i].lower()
+            if ptype in ("office", "retail"):
+                rng2.random()           # tenant loss trigger
+                rng2.uniform(0.15, 0.50)
+            elif ptype == "hotel":
+                rng2.random()
+                rng2.uniform(0.15, 0.50)
+            rng2.random()               # cap rate trigger
+            rng2.gauss(0, 1.0)          # cap rate magnitude
+            if rng2.random() < 0.05:    # surprise default trigger
+                surprise_default_indices.append(i)
 
         logger.info(
             f"  Applied idiosyncratic shocks: "
             f"NOI (mean={np.mean(noi_shock_values):.4f}, std={np.std(noi_shock_values):.4f}), "
             f"{n_tenant_loss} tenant-loss events, "
-            f"{n_cap_shocks} submarket cap rate shocks"
+            f"{n_cap_shocks} submarket cap rate shocks, "
+            f"{n_surprise_defaults} surprise defaults"
         )
     else:
+        n_surprise_defaults = 0
+        surprise_default_indices = []
         logger.info("  Idiosyncratic shocks DISABLED (deterministic label computation)")
 
     # ─── Compute maturity metrics with (possibly shocked) values ─────────────
@@ -426,6 +460,13 @@ def _compute_label_at_maturity(
 
     # Label: distressed at maturity
     df[LABEL_COL] = ((maturity_dscr < 1.0) | (maturity_ltv > 0.70)).astype(int)
+
+    # Apply surprise defaults (Shock 4): force label=1 for ~5% of loans
+    if enable_shocks and surprise_default_indices:
+        label_values = df[LABEL_COL].values
+        for idx in surprise_default_indices:
+            label_values[idx] = 1
+        df[LABEL_COL] = label_values
 
     # Drop the maturity-time columns (prevent leakage into features)
     df.drop(columns=[

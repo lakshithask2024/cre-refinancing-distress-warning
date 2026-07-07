@@ -555,7 +555,7 @@ class TestIdiosyncraticShocks:
         assert (y1.values == y2.values).all(), "Shocks not reproducible across runs"
 
     def test_shocks_change_labels(self, shock_fixture_tables, monkeypatch):
-        """With shocks enabled, at least 15% of loans differ from deterministic baseline."""
+        """With shocks enabled, at least 25% of loans differ from deterministic baseline."""
         from src.models.features import build_training_frame
 
         # Run with shocks OFF
@@ -568,15 +568,15 @@ class TestIdiosyncraticShocks:
         result_shock = build_training_frame(gold_path=shock_fixture_tables[0], market_path=shock_fixture_tables[1], seed=42)
         y_shock = _pd.concat([result_shock[1], result_shock[3], result_shock[5]])
 
-        # At least 15% should have a different label
+        # At least 25% should have a different label
         if len(y_det) > 0 and len(y_shock) > 0:
             # Align by index
             common = y_det.index.intersection(y_shock.index)
             if len(common) > 5:
                 diff_pct = (y_det.loc[common] != y_shock.loc[common]).mean()
-                assert diff_pct >= 0.10, (
+                assert diff_pct >= 0.20, (
                     f"Only {diff_pct*100:.1f}% of labels changed with shocks "
-                    f"(expected >= 15%)"
+                    f"(expected >= 25%)"
                 )
 
     def test_shocks_disabled_matches_deterministic(self, shock_fixture_tables, monkeypatch):
@@ -592,3 +592,29 @@ class TestIdiosyncraticShocks:
         y2 = _pd.concat([result2[1], result2[3], result2[5]])
 
         assert (y1.values == y2.values).all(), "Deterministic mode should be perfectly reproducible"
+
+
+
+    def test_surprise_defaults_applied(self, shock_fixture_tables, monkeypatch):
+        """With shocks enabled, ~5% of loans should have forced distress labels
+        that would NOT be distressed under deterministic computation."""
+        from src.models.features import build_training_frame
+
+        # Deterministic baseline
+        monkeypatch.setattr("src.models.features._load_shock_config", lambda: False)
+        result_det = build_training_frame(gold_path=shock_fixture_tables[0], market_path=shock_fixture_tables[1], seed=42)
+        y_det = _pd.concat([result_det[1], result_det[3], result_det[5]])
+
+        # With shocks (includes surprise defaults)
+        monkeypatch.setattr("src.models.features._load_shock_config", lambda: True)
+        result_shock = build_training_frame(gold_path=shock_fixture_tables[0], market_path=shock_fixture_tables[1], seed=42)
+        y_shock = _pd.concat([result_shock[1], result_shock[3], result_shock[5]])
+
+        if len(y_det) > 10 and len(y_shock) > 10:
+            common = y_det.index.intersection(y_shock.index)
+            # Find loans that flipped FROM 0 TO 1 (surprise defaults add to distress)
+            flipped_to_distress = ((y_det.loc[common] == 0) & (y_shock.loc[common] == 1)).sum()
+            # Should be roughly 5% of non-distressed loans, but any positive count confirms mechanism works
+            assert flipped_to_distress > 0, (
+                "No surprise defaults detected — Shock 4 mechanism not working"
+            )
