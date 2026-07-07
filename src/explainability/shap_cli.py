@@ -60,47 +60,70 @@ def main() -> None:
         gold_path=args.gold_path, market_path=args.market_path
     )
 
-    # Load the trained model — try registry first, then fallback to latest run
+    # Load the trained model — three strategies in priority order
     model = None
+    client = mlflow.tracking.MlflowClient()
 
-    # Attempt 1: Load from Model Registry (version/alias syntax)
+    # Strategy 1: Load via alias (MLflow 3.x @ syntax)
     try:
-        model = mlflow.xgboost.load_model("models:/cre_distress_classifier/Staging")
-        logger.info("Loaded model from registry: cre_distress_classifier/Staging")
+        model = mlflow.xgboost.load_model("models:/cre_distress_classifier@Staging")
+        logger.info("✓ Loaded model via alias: models:/cre_distress_classifier@Staging")
     except Exception as e:
-        logger.info(f"Registry load failed ({e}), trying latest run...")
+        logger.info(f"Alias load failed ({e}), trying version-based load...")
 
-    # Attempt 2: Find the latest run and load from its artifact path
+    # Strategy 2: Load the highest-numbered registered version explicitly
     if model is None:
-        client = mlflow.tracking.MlflowClient()
-        runs = mlflow.search_runs(
-            experiment_names=["cre_distress"],
-            order_by=["start_time DESC"],
-            max_results=5,
-        )
+        try:
+            versions = client.search_model_versions("name='cre_distress_classifier'")
+            if versions:
+                latest = max(versions, key=lambda v: int(v.version))
+                model_uri = f"models:/cre_distress_classifier/{latest.version}"
+                model = mlflow.xgboost.load_model(model_uri)
+                logger.info(f"✓ Loaded model via version: {model_uri} (v{latest.version})")
+        except Exception as e:
+            logger.info(f"Version-based load failed ({e}), trying run artifact search...")
+
+    # Strategy 3: Search recent classifier runs for 'model' artifact
+    if model is None:
+        try:
+            runs = mlflow.search_runs(
+                experiment_names=["cre_distress"],
+                filter_string="tags.mlflow.runName LIKE 'distress_classifier%'",
+                order_by=["start_time DESC"],
+                max_results=10,
+            )
+            # Fallback: if tag filter returns nothing, try without filter
+            if len(runs) == 0:
+                runs = mlflow.search_runs(
+                    experiment_names=["cre_distress"],
+                    order_by=["start_time DESC"],
+                    max_results=10,
+                )
+        except Exception:
+            runs = pd.DataFrame()
+
         if len(runs) == 0:
             print("ERROR: No trained model found. Run train_cli first.", file=sys.stderr)
             sys.exit(1)
 
-        # Find a run that has the 'model' artifact
+        import pandas as pd_  # ensure available for iterrows
+
         for _, run_row in runs.iterrows():
             run_id = run_row["run_id"]
             try:
                 artifacts = client.list_artifacts(run_id)
                 artifact_paths = [a.path for a in artifacts]
-                logger.info(f"  Run {run_id[:8]}... artifacts: {artifact_paths}")
 
-                # The classifier logs as artifact_path="model"
                 if "model" in artifact_paths:
                     model = mlflow.xgboost.load_model(f"runs:/{run_id}/model")
-                    logger.info(f"Loaded model from run {run_id[:8]}... artifact 'model'")
+                    logger.info(f"✓ Loaded model from run {run_id[:8]}... artifact 'model'")
                     break
             except Exception as e:
                 logger.debug(f"  Run {run_id[:8]}... failed: {e}")
                 continue
 
     if model is None:
-        print("ERROR: Could not load model from any run. Check MLflow artifacts.", file=sys.stderr)
+        print("ERROR: Could not load model from any strategy. Check MLflow artifacts.", file=sys.stderr)
         sys.exit(1)
 
     # Compute SHAP
