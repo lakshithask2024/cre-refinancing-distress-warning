@@ -1,0 +1,21 @@
+{
+  "model_name": "cre_distress_classifier",
+  "mlflow_run_id": "d4213554446a41a48bf7cbdf62bfc641",
+  "timestamp": "2026-07-07T01:30:03.166630+00:00",
+  "test_metrics": {
+    "test_auc": 0.9202127659574468,
+    "test_pr_auc": 0.9764702077579365,
+    "test_brier_score": 0.10687196254730225,
+    "test_log_loss": 0.3513440787792206
+  },
+  "best_hyperparameters": {
+    "max_depth": 3,
+    "learning_rate": 0.014408398212485149,
+    "n_estimators": 205,
+    "min_child_weight": 16,
+    "subsample": 0.6062041527976909,
+    "colsample_bytree": 0.8330043528976134,
+    "reg_alpha": 0.2912871247254336,
+    "reg_lambda": 0.3337015935786197
+  }
+}
