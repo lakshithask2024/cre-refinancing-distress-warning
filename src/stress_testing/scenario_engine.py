@@ -204,12 +204,34 @@ def score_portfolio(
     df: pd.DataFrame,
     model: Any,
     feature_names: list[str],
+    market_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Score loans using the XGBoost model under stressed features."""
-    # Build feature matrix matching the model's expected input
-    X = df[feature_names].astype(float).fillna(0.0)
+    """
+    Score loans using the XGBoost model under stressed features.
+
+    Uses featurize_for_scoring() from the features module to ensure the feature
+    matrix exactly matches what the model was trained on.
+    """
+    from src.models.features import featurize_for_scoring, _load_delta_as_df
+
+    # Load market data if not provided
+    if market_df is None:
+        market_df = _load_delta_as_df("data/silver/market_rates")
+
+    X = featurize_for_scoring(
+        loans_df=df,
+        market_df=market_df,
+        model_feature_names=feature_names,
+    )
+
+    # Sanity check: columns must match exactly
+    missing = set(feature_names) - set(X.columns)
+    if missing:
+        raise KeyError(f"Feature matrix missing columns expected by model: {missing}")
+
     proba = model.predict_proba(X)[:, 1]
 
+    df = df.copy()
     df["stressed_pd"] = proba
     df["stressed_distress_tier"] = pd.cut(
         proba,
@@ -225,15 +247,16 @@ def run_scenario(
     model: Any,
     feature_names: list[str],
     baseline_pds: pd.Series | None = None,
+    market_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Execute a single stress scenario end-to-end."""
     name = scenario.get("name", "unknown")
 
-    # Apply shocks
+    # Apply shocks to raw economic variables
     stressed = apply_scenario(portfolio, scenario)
 
-    # Score
-    stressed = score_portfolio(stressed, model, feature_names)
+    # Score (featurizes internally using market data)
+    stressed = score_portfolio(stressed, model, feature_names, market_df=market_df)
 
     # Add baseline comparison
     if baseline_pds is not None:
@@ -266,6 +289,7 @@ def run_scenario(
 def run_all_scenarios(
     scenarios: list[dict[str, Any]],
     gold_path: str | Path = "data/gold/loan_current_state",
+    market_path: str | Path = "data/silver/market_rates",
     output_path: str | Path = STRESS_OUTPUT,
     feature_names: list[str] | None = None,
 ) -> dict[str, pd.DataFrame]:
@@ -277,12 +301,17 @@ def run_all_scenarios(
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
     from src.utils.delta_writer import DeltaWriter
+    from src.models.features import _load_delta_as_df
 
     output_path = Path(output_path)
 
     logger.info("Loading portfolio...")
     portfolio = load_portfolio(gold_path)
     logger.info(f"  Portfolio: {len(portfolio)} loans")
+
+    logger.info("Loading market data...")
+    market_df = _load_delta_as_df(market_path)
+    logger.info(f"  Market records: {len(market_df)}")
 
     logger.info("Loading classifier...")
     model = load_classifier()
@@ -291,16 +320,20 @@ def run_all_scenarios(
     if feature_names is None:
         try:
             feature_names = model.get_booster().feature_names
-        except Exception:
-            # Fallback: use numeric columns from portfolio
-            feature_names = [
-                c for c in portfolio.select_dtypes(include=[np.number]).columns
-                if c not in ("origination_year",)
-            ]
+            if feature_names:
+                logger.info(f"  Model expects {len(feature_names)} features")
+            else:
+                raise ValueError("feature_names is None from booster")
+        except Exception as e:
+            logger.warning(f"  Could not get feature names from model ({e}), inferring from training pipeline")
+            from src.models.features import build_training_frame
+            X_train, _, _, _, _, _, feature_names = build_training_frame(
+                gold_path=gold_path, market_path=market_path
+            )
 
     # Run baseline first
     baseline_scenario = {"name": "baseline", "rate_shock_bps": 0, "cap_rate_shock_bps": 0, "noi_shock_pct": 0.0}
-    baseline_result = run_scenario(baseline_scenario, portfolio, model, feature_names)
+    baseline_result = run_scenario(baseline_scenario, portfolio, model, feature_names, market_df=market_df)
     baseline_pds = baseline_result["stressed_pd"]
 
     results: dict[str, pd.DataFrame] = {}
@@ -312,7 +345,7 @@ def run_all_scenarios(
             continue  # Already computed
 
         logger.info(f"  Running scenario: {name}...")
-        result = run_scenario(scenario, portfolio, model, feature_names, baseline_pds)
+        result = run_scenario(scenario, portfolio, model, feature_names, baseline_pds, market_df=market_df)
         results[name] = result
 
         # Summary line

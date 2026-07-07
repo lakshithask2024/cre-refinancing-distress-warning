@@ -186,3 +186,129 @@ class TestScenarioConfig:
         assert len(baselines) == 1
         assert baselines[0]["rate_shock_bps"] == 0
         assert baselines[0]["cap_rate_shock_bps"] == 0
+
+
+
+# ─── Smoke test: scoring with featurization ───────────────────────────────────
+
+xgb_mod = pytest.importorskip("xgboost", reason="xgboost required for scoring smoke test")
+
+
+class TestScoringSmoke:
+    """Smoke test that the full featurize→score path works without errors."""
+
+    @pytest.mark.slow
+    def test_baseline_scores_run(self, tmp_path):
+        """Load a fixture, featurize, and score with a dummy model — no KeyError."""
+        import xgboost as xgb
+        from src.stress_testing.scenario_engine import apply_scenario, score_portfolio
+        from src.models.features import featurize_for_scoring, NUMERIC_FEATURES_AT_TOBS, ONEHOT_FEATURES
+        from src.utils.delta_writer import DeltaWriter
+        import random
+
+        random.seed(42)
+
+        # Create market fixture
+        market_records = []
+        for year in range(2015, 2026):
+            for month in range(1, 13):
+                market_records.append({
+                    "data_type": "treasury_10y",
+                    "observation_date": f"{year}-{month:02d}-01",
+                    "value": 2.0 + (year - 2015) * 0.2,
+                    "frequency": "monthly",
+                    "property_type": None,
+                    "metro": None,
+                    "_silver_processed_at": "2026-01-01",
+                })
+        for ptype in ["office", "retail", "industrial", "multifamily", "hotel"]:
+            base = {"office": 6.5, "retail": 6.8, "industrial": 5.5, "multifamily": 5.2, "hotel": 7.5}[ptype]
+            for year in range(2015, 2026):
+                for q in range(1, 5):
+                    month = {1: 2, 2: 5, 3: 8, 4: 11}[q]
+                    market_records.append({
+                        "data_type": "cap_rate",
+                        "observation_date": f"{year}-{month:02d}-15",
+                        "value": base + (year - 2015) * 0.1,
+                        "frequency": "quarterly",
+                        "property_type": ptype,
+                        "metro": "National",
+                        "_silver_processed_at": "2026-01-01",
+                    })
+
+        market_df = pd.DataFrame(market_records)
+
+        # Create loan fixture (100 loans)
+        loans = []
+        for i in range(100):
+            orig_year = random.choice([2015, 2016, 2017, 2018])
+            mat_year = orig_year + 5
+            loans.append({
+                "loan_id": f"SMOKE-{i:04d}",
+                "property_type": random.choice(["office", "retail", "industrial", "multifamily", "hotel"]),
+                "metro_area": random.choice(["New York", "Chicago", "LA"]),
+                "origination_year": str(orig_year),
+                "origination_date": f"{orig_year}-06-15",
+                "maturity_date": f"{mat_year}-06-15",
+                "original_balance": 20000000.0,
+                "current_balance": 20000000.0,
+                "note_rate": 0.04,
+                "noi_annual": 1500000.0,
+                "current_cap_rate": 7.0,
+                "current_ltv": 0.75,
+                "refinance_rate": 0.065,
+                "rate_gap": 0.025,
+                "rate_gap_bps": 250.0,
+                "new_dscr": 1.2,
+                "debt_yield": 0.075,
+                "amortization_type": random.choice(["interest_only", "amortizing"]),
+                "balloon_flag": "True",
+                "ltv_at_origination": 0.65,
+                "dscr_at_origination": 1.4,
+                "occupancy_pct": 0.90,
+                "sponsor_credit_tier": "B",
+            })
+        portfolio = pd.DataFrame(loans)
+
+        # Featurize to get expected feature names
+        X = featurize_for_scoring(
+            loans_df=portfolio,
+            market_df=market_df,
+            model_feature_names=NUMERIC_FEATURES_AT_TOBS + ["metro_encoded"],  # partial
+        )
+
+        # Build a dummy model with the right number of features
+        # Use ALL features that featurize_for_scoring might produce
+        full_feature_names = list(X.columns)
+        # Add one-hot columns that would exist
+        for col in ONEHOT_FEATURES:
+            for val in portfolio[col].unique():
+                fname = f"{col}_{val}"
+                if fname not in full_feature_names:
+                    full_feature_names.append(fname)
+
+        # Re-featurize with full feature set
+        X_full = featurize_for_scoring(
+            loans_df=portfolio,
+            market_df=market_df,
+            model_feature_names=full_feature_names,
+        )
+
+        # Train a dummy model on this feature set
+        y_dummy = (np.random.rand(len(X_full)) > 0.5).astype(int)
+        dummy_model = xgb.XGBClassifier(
+            n_estimators=5, max_depth=2, use_label_encoder=False,
+            eval_metric="logloss", verbosity=0, random_state=42,
+        )
+        dummy_model.fit(X_full, y_dummy)
+
+        # Now run the scenario engine's score_portfolio with this model
+        baseline = {"name": "baseline", "rate_shock_bps": 0, "cap_rate_shock_bps": 0, "noi_shock_pct": 0.0}
+        stressed = apply_scenario(portfolio, baseline)
+        scored = score_portfolio(stressed, dummy_model, full_feature_names, market_df=market_df)
+
+        # Assertions
+        assert "stressed_pd" in scored.columns
+        assert "stressed_distress_tier" in scored.columns
+        assert len(scored) == 100
+        assert scored["stressed_pd"].between(0, 1).all()

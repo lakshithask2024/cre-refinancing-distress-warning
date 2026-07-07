@@ -710,3 +710,79 @@ def _run_sanity_checks(
                     f"LEAKAGE DETECTED: feature '{col}' contains forbidden pattern "
                     f"'{pattern}'. Maturity-time values must not be in feature matrix."
                 )
+
+
+
+# ─── Public scoring featurization (used by stress testing) ────────────────────
+
+
+def featurize_for_scoring(
+    loans_df: pd.DataFrame,
+    market_df: pd.DataFrame,
+    model_feature_names: list[str],
+    metro_means: dict[str, float] | None = None,
+    global_mean: float = 0.5,
+) -> pd.DataFrame:
+    """
+    Featurize a raw loans DataFrame for model scoring (inference, not training).
+
+    Used by the stress testing engine to produce the exact feature matrix the
+    trained XGBoost model expects, after applying macro shocks to raw inputs.
+
+    Steps:
+      1. Parse dates, compute T_obs
+      2. Compute features at T_obs (treasury, cap rates, LTV, DSCR)
+      3. Apply one-hot encoding for categoricals
+      4. Apply metro target encoding (using provided means or global fallback)
+      5. Align columns to match model_feature_names exactly
+
+    Args:
+        loans_df: Raw loan records (may have shocks already applied to noi, cap_rate, etc.)
+        market_df: Silver market rates (for T_obs market lookups)
+        model_feature_names: Exact column names the model expects (from model.get_booster().feature_names)
+        metro_means: dict of metro → target-encoded value (from training). If None, uses global_mean.
+        global_mean: Fallback target encoding value (default 0.5)
+
+    Returns:
+        Feature matrix (pd.DataFrame) with columns matching model_feature_names exactly.
+    """
+    df = loans_df.copy()
+
+    # Build market lookups
+    treasury_lookup = _build_treasury_lookup(market_df)
+    cap_rate_lookup = _build_cap_rate_lookup(market_df)
+
+    # Parse dates and compute T_obs
+    df["maturity_date_parsed"] = pd.to_datetime(df["maturity_date"], errors="coerce")
+    df["origination_date_parsed"] = pd.to_datetime(df["origination_date"], errors="coerce")
+    df["T_obs"] = df["maturity_date_parsed"] - pd.Timedelta(days=730)
+
+    # Compute features at T_obs
+    df = _compute_features_at_Tobs(df, treasury_lookup, cap_rate_lookup)
+
+    # Metro target encoding
+    if metro_means:
+        df["metro_encoded"] = df["metro_area"].map(metro_means).fillna(global_mean)
+    else:
+        df["metro_encoded"] = global_mean
+
+    # One-hot encoding (single-split variant)
+    for col in ONEHOT_FEATURES:
+        if col in df.columns:
+            for cat in sorted(df[col].dropna().unique()):
+                new_col = f"{col}_{cat}"
+                df[new_col] = (df[col].astype(str) == str(cat)).astype(int)
+
+    # Build numeric feature columns
+    all_numeric = NUMERIC_FEATURES_AT_TOBS + ["metro_encoded"]
+    for col in all_numeric:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+    # Align to model's expected feature names — add missing cols as 0, drop extras
+    for col in model_feature_names:
+        if col not in df.columns:
+            df[col] = 0.0
+
+    X = df[model_feature_names].astype(float).fillna(0.0)
+    return X
