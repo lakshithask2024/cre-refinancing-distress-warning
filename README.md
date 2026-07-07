@@ -165,6 +165,38 @@ pytest --cov=src --cov-report=html
 
 ---
 
+## Stress Testing
+
+Run all 8 scenarios against the current portfolio:
+
+```bash
+python -m src.stress_testing.stress_cli run-all
+# Or a subset:
+python -m src.stress_testing.stress_cli run-all --scenarios baseline,combined_severe,office_specific
+```
+
+### Scenario Definitions
+
+| Scenario | Rate Shock | Cap Rate Shock | NOI Shock | Macro Interpretation |
+|----------|-----------|---------------|-----------|---------------------|
+| **baseline** | 0 | 0 | 0% | Current conditions (control) |
+| **rate_shock_100bps** | +100 bps | 0 | 0% | Moderate Fed tightening |
+| **rate_shock_200bps** | +200 bps | 0 | 0% | Sustained higher-for-longer |
+| **rate_shock_300bps** | +300 bps | 0 | 0% | Severe monetary tightening |
+| **cap_rate_shock_100bps** | 0 | +100 bps | 0% | Mild investor risk repricing |
+| **cap_rate_shock_200bps** | 0 | +200 bps | 0% | CRE market correction |
+| **combined_severe** | +200 bps | +200 bps | -10% | Full recession + CRE crash |
+| **office_specific** | 0 | +300 bps (office) | -20% (office) | Remote-work structural shift |
+
+### Outputs
+
+- `data/gold/stress_test_results/` — Per-loan predictions by scenario (Delta, partitioned by scenario_name)
+- `data/gold/stress_test_summary/` — Portfolio-level aggregates (Delta)
+- `reports/stress_summary.csv` — Human-readable CSV for reporting
+- `docs/analysis/stress_test_results.md` — Markdown results table
+
+---
+
 ## Training the Model
 
 ### Prerequisites
