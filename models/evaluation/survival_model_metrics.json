@@ -1,0 +1,15 @@
+{
+  "model_name": "cre_distress_survival_cox_ph",
+  "mlflow_run_id": "a55a07a495154b5cb969518cb8f89945",
+  "timestamp": "2026-07-07T04:57:03.854032+00:00",
+  "metrics": {
+    "concordance_train": 0.9549,
+    "concordance_valid": 0.9818,
+    "concordance_test": 0.9399,
+    "log_likelihood": -18640.991022373215
+  },
+  "params": {
+    "penalizer": 0.1,
+    "n_features": 24
+  }
+}

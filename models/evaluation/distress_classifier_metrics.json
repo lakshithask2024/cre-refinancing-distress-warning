@@ -1,7 +1,7 @@
 {
   "model_name": "cre_distress_classifier",
-  "mlflow_run_id": "d4213554446a41a48bf7cbdf62bfc641",
-  "timestamp": "2026-07-07T01:30:03.166630+00:00",
+  "mlflow_run_id": "9bde555b9a184063b06f791b12cff981",
+  "timestamp": "2026-07-07T04:46:57.564355+00:00",
   "test_metrics": {
     "test_auc": 0.9202127659574468,
     "test_pr_auc": 0.9764702077579365,
