@@ -86,9 +86,9 @@ def build_survival_frame(
 
     # Filter to loans with valid dates in market range
     mask = (
-        loans_df["T_obs"] >= pd.Timestamp(market_start)
-        & loans_df["maturity_date_parsed"].notna()
-        & loans_df["origination_date_parsed"].notna()
+        (loans_df["T_obs"] >= pd.Timestamp(market_start))
+        & (loans_df["maturity_date_parsed"].notna())
+        & (loans_df["origination_date_parsed"].notna())
     )
     loans_df = loans_df[mask].copy()
 

@@ -127,7 +127,7 @@ def build_training_frame(
     # Filter: both T_obs and maturity must be within market data range
     mask_tobs = loans_df["T_obs"] >= pd.Timestamp(market_start)
     mask_maturity = loans_df["maturity_date_parsed"] <= pd.Timestamp(market_end)
-    mask_valid_dates = loans_df["maturity_date_parsed"].notna() & loans_df["T_obs"].notna()
+    mask_valid_dates = (loans_df["maturity_date_parsed"].notna()) & (loans_df["T_obs"].notna())
 
     loans_filtered = loans_df[mask_tobs & mask_maturity & mask_valid_dates].copy()
     n_dropped = len(loans_df) - len(loans_filtered)
