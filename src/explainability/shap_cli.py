@@ -43,29 +43,65 @@ def main() -> None:
         )
         sys.exit(1)
 
+    import os
     import mlflow
+    import mlflow.xgboost
     from src.models.features import build_training_frame
     from src.explainability.shap_explainer import compute_shap_explanations
 
-    # Load the trained model from MLflow
-    mlflow.set_tracking_uri("sqlite:///mlruns.db")
+    # Use the same tracking URI as the classifier (env-driven, consistent)
+    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db")
+    mlflow.set_tracking_uri(tracking_uri)
+    logger = logging.getLogger(__name__)
+    logger.info(f"MLflow tracking URI: {tracking_uri}")
 
     # Build test data
     _, _, _, _, X_test, y_test, feature_names = build_training_frame(
         gold_path=args.gold_path, market_path=args.market_path
     )
 
-    # Load latest registered model
+    # Load the trained model — try registry first, then fallback to latest run
+    model = None
+
+    # Attempt 1: Load from Model Registry (version/alias syntax)
     try:
         model = mlflow.xgboost.load_model("models:/cre_distress_classifier/Staging")
-    except Exception:
-        logging.warning("Could not load from registry, trying latest run...")
-        runs = mlflow.search_runs(experiment_names=["cre_distress"])
+        logger.info("Loaded model from registry: cre_distress_classifier/Staging")
+    except Exception as e:
+        logger.info(f"Registry load failed ({e}), trying latest run...")
+
+    # Attempt 2: Find the latest run and load from its artifact path
+    if model is None:
+        client = mlflow.tracking.MlflowClient()
+        runs = mlflow.search_runs(
+            experiment_names=["cre_distress"],
+            order_by=["start_time DESC"],
+            max_results=5,
+        )
         if len(runs) == 0:
             print("ERROR: No trained model found. Run train_cli first.", file=sys.stderr)
             sys.exit(1)
-        latest_run = runs.iloc[0]
-        model = mlflow.xgboost.load_model(f"runs:/{latest_run.run_id}/model")
+
+        # Find a run that has the 'model' artifact
+        for _, run_row in runs.iterrows():
+            run_id = run_row["run_id"]
+            try:
+                artifacts = client.list_artifacts(run_id)
+                artifact_paths = [a.path for a in artifacts]
+                logger.info(f"  Run {run_id[:8]}... artifacts: {artifact_paths}")
+
+                # The classifier logs as artifact_path="model"
+                if "model" in artifact_paths:
+                    model = mlflow.xgboost.load_model(f"runs:/{run_id}/model")
+                    logger.info(f"Loaded model from run {run_id[:8]}... artifact 'model'")
+                    break
+            except Exception as e:
+                logger.debug(f"  Run {run_id[:8]}... failed: {e}")
+                continue
+
+    if model is None:
+        print("ERROR: Could not load model from any run. Check MLflow artifacts.", file=sys.stderr)
+        sys.exit(1)
 
     # Compute SHAP
     summary = compute_shap_explanations(

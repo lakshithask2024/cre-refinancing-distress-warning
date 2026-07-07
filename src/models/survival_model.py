@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,7 +51,7 @@ from src.models.features import (
 
 logger = logging.getLogger(__name__)
 
-MLFLOW_TRACKING_URI = "sqlite:///mlruns.db"
+MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db")
 METRICS_OUTPUT = Path("models/evaluation/survival_model_metrics.json")
 PREDICTIONS_OUTPUT = Path("data/gold/loan_survival_predictions")
 
