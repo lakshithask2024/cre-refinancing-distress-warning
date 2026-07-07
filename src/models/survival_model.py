@@ -285,9 +285,9 @@ def _predict_and_save_survival(
         median_ttd = float(below_50.index[0]) if len(below_50) > 0 else 999.0
 
         # Survival probabilities at specific horizons
-        s_12 = float(sf.iloc[(sf.index - 12).abs().argmin()]) if len(sf) > 0 else 1.0
-        s_24 = float(sf.iloc[(sf.index - 24).abs().argmin()]) if len(sf) > 0 else 1.0
-        s_36 = float(sf.iloc[(sf.index - 36).abs().argmin()]) if len(sf) > 0 else 1.0
+        s_12 = float(sf.iloc[np.abs(sf.index - 12).argmin()]) if len(sf) > 0 else 1.0
+        s_24 = float(sf.iloc[np.abs(sf.index - 24).argmin()]) if len(sf) > 0 else 1.0
+        s_36 = float(sf.iloc[np.abs(sf.index - 36).argmin()]) if len(sf) > 0 else 1.0
 
         predictions.append({
             "loan_id": str(loan_id),
