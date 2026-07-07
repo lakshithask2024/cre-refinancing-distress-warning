@@ -101,6 +101,24 @@ def run_model() -> None:
     #   - Score all loans with distress probability + time-to-distress
     #   - Compute SHAP values for explainability
     #   - Write scored results to gold layer
+    try:
+        from src.models.distress_classifier import train_and_log
+        train_and_log(experiment_name="cre_distress")
+    except ImportError as e:
+        logger.warning(f"  Skipping classifier training (missing dep: {e.name})")
+
+    try:
+        from src.models.survival_model import train_survival_model
+        train_survival_model(experiment_name="cre_distress")
+    except ImportError as e:
+        logger.warning(f"  Skipping survival model (missing dep: {e.name})")
+
+    try:
+        from src.explainability.shap_cli import main as shap_main
+        shap_main()
+    except (ImportError, SystemExit) as e:
+        logger.warning(f"  Skipping SHAP computation: {e}")
+
     logger.info("Model training and scoring complete.")
 
 
