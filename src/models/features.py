@@ -150,7 +150,17 @@ def build_training_frame(
 
     # ─── Compute label at maturity ────────────────────────────────────────────
     loans_filtered = _compute_label_at_maturity(
-        loans_filtered, treasury_lookup, cap_rate_lookup, enable_shocks=enable_shocks
+        loans_filtered, treasury_lookup, cap_rate_lookup,
+        enable_shocks=enable_shocks,
+        surprise_default_prob=0.05,
+    )
+
+    # ─── Diagnostic: label distribution before split ──────────────────────────
+    total_labels = len(loans_filtered)
+    positive_labels = int(loans_filtered[LABEL_COL].sum())
+    logger.info(
+        f"  Label distribution (post-shock): {positive_labels}/{total_labels} distressed "
+        f"({positive_labels/total_labels*100:.1f}%)"
     )
 
     # ─── Time-based split ─────────────────────────────────────────────────────
@@ -165,10 +175,17 @@ def build_training_frame(
     df_valid = loans_filtered[valid_mask].copy()
     df_test = loans_filtered[test_mask].copy()
 
-    # Warn if any split is empty
+    # Diagnostic: per-split label balance
     for name, split_df in [("train", df_train), ("valid", df_valid), ("test", df_test)]:
         if len(split_df) == 0:
             logger.warning(f"WARNING: {name} split is empty! Check origination_year distribution.")
+        else:
+            split_pos = int(split_df[LABEL_COL].sum())
+            logger.info(
+                f"  {name:5s}: {len(split_df):5d} rows, "
+                f"label_mean={split_df[LABEL_COL].mean():.3f} "
+                f"({split_pos} pos / {len(split_df)-split_pos} neg)"
+            )
 
     logger.info(
         f"Split sizes — train: {len(df_train)}, valid: {len(df_valid)}, test: {len(df_test)}"
@@ -324,6 +341,7 @@ def _compute_label_at_maturity(
     treasury_lookup: dict[str, float],
     cap_rate_lookup: dict[tuple[str, str], float],
     enable_shocks: bool = True,
+    surprise_default_prob: float = 0.05,
 ) -> pd.DataFrame:
     """
     Compute the refinancing distress label using market conditions AT maturity,
@@ -333,12 +351,23 @@ def _compute_label_at_maturity(
     Label = 1 if loan would be in distress at maturity date:
       - maturity_dscr < 1.0 (can't cover debt service at maturity refi rate)
       OR
-      - maturity_ltv > 0.70 (insufficient equity for refinancing)
+      - maturity_ltv > 0.90 (lender requires significant borrower cash-in to refi)
+
+    Why 0.90 LTV (not 0.70):
+      With cap rates expanding 150-200bps from origination, a 0.70 threshold
+      mechanically flags ~65% of the portfolio as distressed just from the
+      cap-rate-driven value decline — independent of any model features.
+      The 0.90 threshold reflects the realistic point where a lender will
+      actually reject a refinancing (10% equity remaining or less).
+      This gives a ~44% base distress rate, leaving room for shocks to
+      provide genuine stochasticity and for the model to learn meaningful
+      discrimination.
 
     Shocks (applied ONLY to label, not features):
       1. NOI volatility: property-specific random shock to maturity NOI
-      2. Occupancy shock: 10% of office/retail get tenant loss event
-      3. Submarket cap rate shock: 15% of loans get additional cap rate noise
+      2. Occupancy shock: office/retail/hotel tenant loss events
+      3. Submarket cap rate shock: 30% of loans get additional cap rate noise
+      4. Surprise default: forced distress for unobservable risk factors
     """
     # Market conditions at maturity
     df["treasury_10y_at_maturity"] = df["maturity_date_parsed"].apply(
@@ -405,8 +434,8 @@ def _compute_label_at_maturity(
                 cap_rate_at_maturity[i] = cap_rate_at_maturity[i] + cap_shock
                 n_cap_shocks += 1
 
-            # Shock 4: Surprise default (5% — unobservable factors)
-            if rng.random() < 0.05:
+            # Shock 4: Surprise default (unobservable factors)
+            if surprise_default_prob > 0 and rng.random() < surprise_default_prob:
                 n_surprise_defaults += 1
                 # Will force label=1 after metric computation (below)
 
@@ -426,7 +455,7 @@ def _compute_label_at_maturity(
                 rng2.uniform(0.15, 0.50)
             rng2.random()               # cap rate trigger
             rng2.gauss(0, 1.0)          # cap rate magnitude
-            if rng2.random() < 0.05:    # surprise default trigger
+            if rng2.random() < surprise_default_prob:    # surprise default trigger
                 surprise_default_indices.append(i)
 
         logger.info(
@@ -459,7 +488,8 @@ def _compute_label_at_maturity(
     maturity_dscr = np.where(ds_mat > 0, noi_base / ds_mat, 0)
 
     # Label: distressed at maturity
-    df[LABEL_COL] = ((maturity_dscr < 1.0) | (maturity_ltv > 0.70)).astype(int)
+    # Dual-trigger: DSCR below breakeven OR LTV above 90% (severe negative equity)
+    df[LABEL_COL] = ((maturity_dscr < 1.0) | (maturity_ltv > 0.90)).astype(int)
 
     # Apply surprise defaults (Shock 4): force label=1 for ~5% of loans
     if enable_shocks and surprise_default_indices:
