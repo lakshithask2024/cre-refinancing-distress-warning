@@ -421,3 +421,61 @@ class TestOptunaSearchSpace:
         optuna.logging.set_verbosity(optuna.logging.WARNING)
         study.optimize(dummy_objective, n_trials=5)
         assert len(study.trials) == 5
+
+
+
+# ─── Test: Model artifact loadable after training ─────────────────────────────
+
+xgb_mod = pytest.importorskip("xgboost", reason="xgboost required for artifact test")
+mlflow_mod = pytest.importorskip("mlflow", reason="mlflow required for artifact test")
+
+
+class TestModelArtifact:
+    """Verify that model artifacts are properly written and loadable."""
+
+    @pytest.mark.slow
+    def test_model_artifact_loadable_after_training(self, fixture_tables, tmp_path, monkeypatch):
+        """Train on tiny fixture, confirm model artifact can be loaded back."""
+        import mlflow
+        import mlflow.xgboost
+
+        # Point MLflow to a temp directory
+        tracking_uri = f"sqlite:///{tmp_path}/test_mlflow.db"
+        monkeypatch.setenv("MLFLOW_TRACKING_URI", tracking_uri)
+        monkeypatch.setattr(
+            "src.models.distress_classifier.MLFLOW_TRACKING_URI", tracking_uri
+        )
+
+        mlflow.set_tracking_uri(tracking_uri)
+
+        from src.models.distress_classifier import train_and_log
+
+        gold_path, market_path = fixture_tables
+        run_id = train_and_log(
+            experiment_name="test_artifact",
+            n_trials=2,
+            seed=42,
+            gold_path=str(gold_path),
+            market_path=str(market_path),
+        )
+
+        # The run should exist
+        assert run_id is not None
+
+        # The model should be loadable from the registry
+        client = mlflow.tracking.MlflowClient()
+        versions = client.search_model_versions("name='cre_distress_classifier'")
+        assert len(versions) > 0, "No model versions registered"
+
+        # Load the model via run artifacts
+        run = mlflow.get_run(run_id)
+        artifacts = client.list_artifacts(run_id)
+        artifact_paths = [a.path for a in artifacts]
+        assert "model" in artifact_paths, (
+            f"'model' artifact not found. Available: {artifact_paths}"
+        )
+
+        # Actually load it
+        loaded_model = mlflow.xgboost.load_model(f"runs:/{run_id}/model")
+        assert loaded_model is not None
+        assert hasattr(loaded_model, "predict_proba")

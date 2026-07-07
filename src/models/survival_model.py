@@ -232,6 +232,24 @@ def train_survival_model(
             json.dump(metrics, f, indent=2)
         mlflow.log_artifact(str(METRICS_OUTPUT), "evaluation")
 
+        # Log the survival model as a pickle artifact
+        import pickle
+        import tempfile
+
+        model_path = os.path.join(tempfile.gettempdir(), "cox_ph_model.pkl")
+        with open(model_path, "wb") as f:
+            pickle.dump(cph, f)
+        mlflow.log_artifact(model_path, "model")
+
+        # Verify the artifact was saved
+        client = mlflow.tracking.MlflowClient()
+        artifacts = client.list_artifacts(run_id)
+        artifact_paths = [a.path for a in artifacts]
+        if "model" in artifact_paths:
+            logger.info(f"  ✓ Survival model artifact verified at run {run_id[:8]}...")
+        else:
+            logger.warning(f"  ✗ Survival model artifact NOT found in artifacts: {artifact_paths}")
+
         # Predict survival for all loans
         _predict_and_save_survival(cph, df_train, df_valid, df_test, feature_cols)
 

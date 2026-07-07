@@ -234,12 +234,36 @@ def train_and_log(
         # Confusion matrix
         _log_confusion_matrix_plot(y_test, y_test_pred)
 
-        # Log the model
-        mlflow.xgboost.log_model(
-            best_model,
+        # Log the model (MLflow 3.x pattern: log + register + verify)
+        model_info = mlflow.xgboost.log_model(
+            xgb_model=best_model,
             artifact_path="model",
+            input_example=X_train.iloc[:5],
             registered_model_name=MODEL_REGISTRY_NAME,
         )
+
+        # Set Staging alias on the registered version
+        client = mlflow.tracking.MlflowClient()
+        if model_info.registered_model_version:
+            try:
+                client.set_registered_model_alias(
+                    MODEL_REGISTRY_NAME, "Staging",
+                    version=model_info.registered_model_version,
+                )
+                logger.info(f"  Model registered as '{MODEL_REGISTRY_NAME}' v{model_info.registered_model_version} (alias: Staging)")
+            except Exception as alias_err:
+                logger.warning(f"  Could not set alias (MLflow version may not support aliases): {alias_err}")
+
+        # Verify the model artifact is actually loadable
+        try:
+            _loaded = mlflow.xgboost.load_model(model_info.model_uri)
+            logger.info(f"  ✓ Model artifact verified loadable at {model_info.model_uri}")
+        except Exception as load_err:
+            logger.error(f"  ✗ Model logged but NOT loadable: {load_err}")
+            raise RuntimeError(
+                f"Model registration succeeded but artifact is not loadable. "
+                f"URI: {model_info.model_uri}, Error: {load_err}"
+            ) from load_err
 
         # Write metrics JSON
         _write_metrics_json(test_metrics, best_params, parent_run_id)
@@ -247,7 +271,6 @@ def train_and_log(
     elapsed = time.time() - start_time
     logger.info(f"\nTraining complete in {elapsed:.1f}s")
     logger.info(f"MLflow run_id: {parent_run_id}")
-    logger.info(f"Model registered as '{MODEL_REGISTRY_NAME}' (Staging)")
 
     return parent_run_id
 
