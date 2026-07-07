@@ -58,7 +58,7 @@ from src.models.features import build_training_frame
 logger = logging.getLogger(__name__)
 
 # Default paths
-MLFLOW_TRACKING_URI = "file:./mlruns"
+MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db")
 METRICS_OUTPUT_DIR = Path("models/evaluation")
 MODEL_REGISTRY_NAME = "cre_distress_classifier"
 
