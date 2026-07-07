@@ -1,0 +1,9 @@
+scenario_name,total_loans,pct_loans_distressed,avg_predicted_pd,median_predicted_pd,avg_delta_pd,total_upb,total_upb_distressed,pct_upb_distressed,worst_metros,worst_property_types
+baseline,10000,52.87,0.5706,0.5592,0.0,277666785000.0,155022867000.0,55.83,"Atlanta, Boston, Chicago, Dallas, Denver","hotel, industrial, multifamily, office, retail"
+rate_shock_100bps,10000,55.13,0.5857,0.6141,0.01510000042617321,277666785000.0,161448026000.0,58.14,"San Francisco, Philadelphia, Minneapolis, New York, Phoenix","hotel, retail, multifamily, office, industrial"
+rate_shock_200bps,10000,57.06,0.5937,0.6249,0.023099999874830246,277666785000.0,167239192000.0,60.23,"Philadelphia, Minneapolis, New York, San Francisco, Phoenix","hotel, retail, multifamily, office, industrial"
+rate_shock_300bps,10000,58.73,0.6004,0.6359,0.02979999966919422,277666785000.0,172540790000.0,62.14,"Philadelphia, Dallas, Minneapolis, San Francisco, Atlanta","hotel, retail, multifamily, industrial, office"
+cap_rate_shock_100bps,10000,64.91,0.6508,0.7279,0.08020000159740448,277666785000.0,187048404000.0,67.36,"Houston, San Francisco, Seattle, Denver, Los Angeles","multifamily, industrial, retail, hotel, office"
+cap_rate_shock_200bps,10000,74.76,0.7075,0.7885,0.13689999282360077,277666785000.0,213494647000.0,76.89,"Houston, Los Angeles, San Francisco, Seattle, Minneapolis","multifamily, industrial, retail, hotel, office"
+combined_severe,10000,84.42,0.782,0.8654,0.21150000393390656,277666785000.0,238137261000.0,85.76,"San Francisco, Houston, Philadelphia, Atlanta, Los Angeles","multifamily, industrial, retail, hotel, office"
+office_specific,10000,58.46,0.6137,0.6916,0.04320000112056732,277666785000.0,170769197000.0,61.5,"Chicago, Denver, Dallas, New York, Miami","office, hotel, industrial, multifamily, retail"
